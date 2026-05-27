@@ -151,8 +151,12 @@ class RuntimeExecutor:
         system_prompt: str,
         messages: list[dict],
         model: str = "gemini-2.0-flash",
-    ) -> str | None:
-        """Async LLM call via Google Gemini.  Returns None if no client is configured.
+    ) -> tuple[str | None, int]:
+        """Async LLM call via Google Gemini.  Returns (text, tokens_used) tuple.
+
+        ``text`` is None if no client is configured or the call fails.
+        ``tokens_used`` is the real prompt+candidates token count from Gemini's
+        ``usage_metadata``; falls back to 0 on error.
 
         Converts the memory store's OpenAI-style message list
         (``[{"role": "user"|"assistant", "content": "..."}]``) to the Gemini
@@ -161,7 +165,7 @@ class RuntimeExecutor:
         """
         client = self._get_gemini_client()
         if client is None:
-            return None
+            return None, 0
         try:
             from google.genai import types  # type: ignore[import]
 
@@ -190,10 +194,12 @@ class RuntimeExecutor:
                     system_instruction=system_prompt,
                 ),
             )
-            return response.text
+            usage = response.usage_metadata
+            tokens = (usage.prompt_token_count or 0) + (usage.candidates_token_count or 0)
+            return response.text, tokens
         except Exception as exc:  # noqa: BLE001
             logger.warning("Gemini LLM call failed: %s", exc)
-            return None
+            return None, 0
 
     # ------------------------------------------------------------------
     # Public async API
@@ -219,8 +225,9 @@ class RuntimeExecutor:
         result = self._run_agent_step(agent, user_input)
 
         # --- async LLM synthesis when no tool was involved ---
+        llm_tokens = 0
         if not result["tool_outputs"]:
-            llm_response = await self._llm_call(
+            llm_response, llm_tokens = await self._llm_call(
                 system_prompt=agent.system_prompt or "You are a helpful assistant.",
                 messages=self.memory.as_messages(str(agent.id)),
                 model=agent.model or "gemini-2.0-flash",
@@ -234,6 +241,10 @@ class RuntimeExecutor:
                     pass  # already cleared; re-append will happen below
                 self.memory.append(str(agent.id), user_input)
                 self.memory.append(str(agent.id), llm_response)
+
+        # Real token count from Gemini; fall back to word-count estimate for
+        # tool-only steps where no LLM call was made.
+        tokens_used = llm_tokens or max(1, len(result["prompt"].split()) + len(result["response"].split()))
 
         # --- persist to DB ---
         if workflow_id is not None:
@@ -259,8 +270,8 @@ class RuntimeExecutor:
                     "response": result["response"],
                     "tool_outputs": result["tool_outputs"],
                 },
-                tokens_used=max(1, len(result["prompt"].split()) + len(result["response"].split())),
-                cost=0.0,
+                tokens_used=tokens_used,
+                cost=round(tokens_used * 0.000_000_15, 6),  # gemini-2.0-flash: ~$0.15/1M tokens
                 created_at=datetime.now(timezone.utc),
             )
         )
@@ -352,6 +363,9 @@ class RuntimeExecutor:
                     metadata_json={"tool_outputs": step.get("tool_outputs", [])},
                 )
             )
+            wf_tokens = step.get("tokens_used") or max(
+                1, len(step.get("prompt", "").split()) + len(step["response"].split())
+            )
             db.add(
                 ExecutionLog(
                     workflow_id=workflow.id,
@@ -360,8 +374,8 @@ class RuntimeExecutor:
                     status="success",
                     input={"prompt": step.get("prompt", "")},
                     output={"response": step["response"], "tool_outputs": step.get("tool_outputs", [])},
-                    tokens_used=max(1, len(step.get("prompt", "").split()) + len(step["response"].split())),
-                    cost=0.0,
+                    tokens_used=wf_tokens,
+                    cost=round(wf_tokens * 0.000_000_15, 6),
                     created_at=datetime.now(timezone.utc),
                 )
             )
