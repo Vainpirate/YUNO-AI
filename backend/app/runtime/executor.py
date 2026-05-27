@@ -153,7 +153,7 @@ class RuntimeExecutor:
         self,
         system_prompt: str,
         messages: list[dict],
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3-flash-preview",
     ) -> tuple[str | None, int]:
         """Async LLM call via Google Gemini.  Returns (text, tokens_used) tuple.
 
@@ -224,25 +224,36 @@ class RuntimeExecutor:
         # --- emit: agent is running ---
         await _safe_publish_agent(str(agent.id), {"status": "running", "agent": agent.name})
 
+        # Snapshot history BEFORE _run_agent_step appends the placeholder so
+        # the message list sent to Gemini always ends with a user turn.
+        prior_messages = self.memory.as_messages(str(agent.id))
+
         # --- synchronous step (tools + prompt) ---
         result = self._run_agent_step(agent, user_input)
 
-        # --- async LLM synthesis when no tool was involved ---
+        # --- async LLM synthesis (always runs when Gemini key is set) ---
         llm_tokens = 0
-        if not result["tool_outputs"]:
-            llm_response, llm_tokens = await self._llm_call(
-                system_prompt=agent.system_prompt or "You are a helpful assistant.",
-                messages=self.memory.as_messages(str(agent.id)),
-                model=agent.model or "gemini-2.5-flash",
+        user_content = user_input
+        if result["tool_outputs"]:
+            tool_ctx = "\n".join(
+                f"[{t['tool']}]: {t['result']}" for t in result["tool_outputs"]
             )
-            if llm_response:
-                # Replace placeholder with real LLM output and update memory
-                result["response"] = llm_response
-                # Overwrite the last two memory entries with the real response
-                self.memory.clear(str(agent.id))
-                # memory was cleared; re-append the real exchange
-                self.memory.append(str(agent.id), user_input)
-                self.memory.append(str(agent.id), llm_response)
+            user_content += f"\n\nTool data available:\n{tool_ctx}"
+
+        llm_response, llm_tokens = await self._llm_call(
+            system_prompt=agent.system_prompt or "You are a helpful assistant.",
+            messages=prior_messages + [{"role": "user", "content": user_content}],
+            model=agent.model or "gemini-3-flash-preview",
+        )
+        if llm_response:
+            result["response"] = llm_response
+            self.memory.clear(str(agent.id))
+            for m in prior_messages:
+                self.memory.append(str(agent.id), m["content"])
+            self.memory.append(str(agent.id), user_input)
+            self.memory.append(str(agent.id), llm_response)
+        else:
+            logger.warning("LLM returned no response for agent %s", agent.name)
 
         # Real token count from Gemini; fall back to word-count estimate for
         # tool-only steps where no LLM call was made.
@@ -473,7 +484,7 @@ class RuntimeExecutor:
                 llm_response, llm_tokens = await self._llm_call(
                     system_prompt=_agent.system_prompt or "You are a helpful assistant.",
                     messages=llm_messages,
-                    model=_agent.model or "gemini-2.5-flash",
+                    model=_agent.model or "gemini-3-flash-preview",
                 )
                 if llm_response:
                     result["response"] = llm_response
@@ -605,7 +616,7 @@ class RuntimeExecutor:
             llm_response, llm_tokens = await self._llm_call(
                 system_prompt=agent.system_prompt or "You are a helpful assistant.",
                 messages=prior_messages + [{"role": "user", "content": user_content}],
-                model=agent.model or "gemini-2.5-flash",
+                model=agent.model or "gemini-3-flash-preview",
             )
             if llm_response:
                 result["response"] = llm_response

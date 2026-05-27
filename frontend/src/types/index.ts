@@ -117,11 +117,11 @@ export const AVAILABLE_TOOLS = [
 ] as const;
 
 export const AVAILABLE_MODELS = [
-  "gemini-2.0-flash",
+  "gemini-3-flash-preview",
   "gemini-2.0-flash-lite",
   "gemini-1.5-flash",
   "gemini-1.5-pro",
-  "gemini-2.5-flash-preview-05-20",
+  "gemini-3-flash-preview-preview-05-20",
 ] as const;
 
 export const AVAILABLE_CHANNELS = ["telegram", "slack", "webhook"] as const;
