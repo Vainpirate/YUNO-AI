@@ -3,7 +3,7 @@ def test_agent_crud(client):
         "name": "Researcher",
         "role": "research",
         "system_prompt": "Find facts",
-        "model": "gpt-4o-mini",
+        "model": "gemini-2.0-flash",
         "tools": ["calculator"],
         "channels": ["telegram"],
         "memory_config": {},

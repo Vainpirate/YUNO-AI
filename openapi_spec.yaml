@@ -54,7 +54,7 @@ paths:
               name: Researcher
               role: Web Researcher
               system_prompt: You are an expert researcher.
-              model: gpt-4o-mini
+              model: gemini-2.0-flash
               tools: [calculator, datetime_now]
               channels: [telegram]
               memory_config: {}
@@ -543,7 +543,7 @@ components:
           type: string
         model:
           type: string
-          example: gpt-4o-mini
+          example: gemini-2.0-flash
         tools:
           type: array
           items:
@@ -575,7 +575,7 @@ components:
           type: string
         model:
           type: string
-          default: gpt-4o-mini
+          default: gemini-2.0-flash
         tools:
           type: array
           items:

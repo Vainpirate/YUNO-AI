@@ -5,7 +5,7 @@ def test_message_delivery_and_logs(client):
             "name": "Messenger",
             "role": "math",
             "system_prompt": "Compute",
-            "model": "gpt-4o-mini",
+            "model": "gemini-2.0-flash",
             "tools": ["calculator"],
             "channels": [],
             "memory_config": {},

@@ -36,7 +36,7 @@ pip install -r requirements.txt
 
 # Copy and edit environment variables
 cp .env.example .env
-# Open .env and set OPENAI_API_KEY and/or TELEGRAM_BOT_TOKEN
+# Open .env and set GEMINI_API_KEY and/or TELEGRAM_BOT_TOKEN
 ```
 
 ### Environment Variables
@@ -46,11 +46,11 @@ cp .env.example .env
 | `APP_ENV` | `development` | Environment tag |
 | `DATABASE_URL` | `sqlite:///./yuno_dev.db` | SQLAlchemy DB URL |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection |
-| `OPENAI_API_KEY` | _(empty)_ | OpenAI key — enables real LLM responses |
+| `GEMINI_API_KEY` | _(empty)_ | Gemini API key — enables real LLM responses |
 | `TELEGRAM_BOT_TOKEN` | _(empty)_ | Telegram bot token — enables bot polling |
 | `FRONTEND_URL` | `http://localhost:3000` | CORS allow-list origin |
 
-> The platform works without `OPENAI_API_KEY` — agents return deterministic tool output.
+> The platform works without `GEMINI_API_KEY` — agents return deterministic tool output.
 > The platform works without `TELEGRAM_BOT_TOKEN` — Telegram polling is silently skipped.
 
 ---

@@ -230,41 +230,75 @@ when a condition field is present.
 
 ## 4. Adding a New LLM Provider
 
-The LLM call lives in `RuntimeExecutor._llm_call()`:
+The LLM call lives in `RuntimeExecutor._llm_call()` in
+`backend/app/runtime/executor.py`. The platform currently uses **Google Gemini**
+(`google-genai` SDK) as its default provider. The patterns below show how to
+add OpenAI or Anthropic as alternatives.
+
+### Add OpenAI as an alternative provider
 
 ```python
-# backend/app/runtime/executor.py
+# backend/app/runtime/executor.py — inside RuntimeExecutor
 
-async def _llm_call(self, system_prompt: str, messages: list[dict], model: str) -> str | None:
-    client = self._get_openai_client()   # ← swap this
-    ...
+def _get_openai_client(self):
+    from app.config import settings
+    if not getattr(settings, "openai_api_key", ""):
+        return None
+    from openai import AsyncOpenAI  # pip install openai
+    return AsyncOpenAI(api_key=settings.openai_api_key)
+
+async def _llm_call(self, system_prompt, messages, model="gemini-2.0-flash"):
+    # Route gpt-* models to OpenAI
+    if model.startswith("gpt-"):
+        client = self._get_openai_client()
+        if client is None:
+            return None
+        try:
+            completion = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system_prompt}] + messages,
+            )
+            return completion.choices[0].message.content
+        except Exception as exc:
+            logger.warning("OpenAI LLM call failed: %s", exc)
+            return None
+
+    # ... existing Gemini path below
 ```
 
-To support Anthropic Claude:
+Add `openai_api_key: str = ""` to `config.py` and `OPENAI_API_KEY=` to `.env.example`.
+Agents that set `model: "gpt-4o-mini"` will route through OpenAI.
+
+### Add Anthropic Claude as an alternative provider
 
 ```python
-from anthropic import AsyncAnthropic
-
 def _get_anthropic_client(self):
     from app.config import settings
-    if not settings.anthropic_api_key:
+    if not getattr(settings, "anthropic_api_key", ""):
         return None
+    from anthropic import AsyncAnthropic  # pip install anthropic
     return AsyncAnthropic(api_key=settings.anthropic_api_key)
 
-async def _llm_call(self, system_prompt, messages, model="claude-sonnet-4-6"):
+async def _llm_call(self, system_prompt, messages, model="gemini-2.0-flash"):
     if model.startswith("claude"):
         client = self._get_anthropic_client()
         if client is None:
             return None
-        response = await client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=system_prompt,
-            messages=messages,
-        )
-        return response.content[0].text
-    # ... existing OpenAI path
+        try:
+            response = await client.messages.create(
+                model=model,
+                max_tokens=1024,
+                system=system_prompt,
+                messages=messages,  # role/content format matches Anthropic
+            )
+            return response.content[0].text
+        except Exception as exc:
+            logger.warning("Anthropic LLM call failed: %s", exc)
+            return None
+
+    # ... existing Gemini path below
 ```
 
-Add `ANTHROPIC_API_KEY` to `config.py` and `.env.example`, then agents that
-set `model: "claude-sonnet-4-6"` will route through the Anthropic client.
+Add `anthropic_api_key: str = ""` to `config.py` and `ANTHROPIC_API_KEY=` to
+`.env.example`. Agents that set `model: "claude-sonnet-4-6"` will route through
+the Anthropic client.

@@ -120,7 +120,7 @@ execute_workflow(db, workflow, initial_input)
         │       ├─ Load memory (conversation buffer)
         │       ├─ Build prompt (system + memory + input)
         │       ├─ Execute each registered tool
-        │       ├─ (async) LLM call if no tool output + OPENAI_API_KEY set
+        │       ├─ (async) LLM call if no tool output + GEMINI_API_KEY set
         │       └─ Return {response, tool_outputs, prompt}
         │
         ├─ Persist to DB
@@ -202,4 +202,4 @@ The current `DELETE /api/agents/{id}` performs a hard delete. Execution logs ref
 | Error format | HTTP exceptions with `detail` string | Add correlation ID + structured error body |
 | Observability | `logging` to stdout | Ship to structured log aggregator (Loki/Datadog) |
 | Scalability | Single-process | Replace in-memory broadcaster with Redis pub/sub |
-| LLM providers | OpenAI (AsyncOpenAI) | Add Anthropic / Groq adapter in `executor.py` |
+| LLM providers | Google Gemini (google-genai) | Add OpenAI / Anthropic adapter in `executor.py` |

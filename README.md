@@ -39,7 +39,7 @@ cd yuno-ai
 
 # 2. Copy and fill in environment variables
 cp backend/.env.example backend/.env
-# → set OPENAI_API_KEY and (optionally) TELEGRAM_BOT_TOKEN
+# → set GEMINI_API_KEY and (optionally) TELEGRAM_BOT_TOKEN
 
 # 3. Start all services
 docker-compose up --build
@@ -117,7 +117,7 @@ npm run dev                   # → http://localhost:5173
 1. **User** sends a prompt via UI or Telegram.
 2. **FastAPI** validates and routes the request to `RuntimeExecutor`.
 3. **RuntimeExecutor** builds a LangGraph `StateGraph` from the workflow DAG, then invokes it.
-4. **Each agent node** executes: loads memory → runs registered tools → calls OpenAI LLM (if key is set) → returns response.
+4. **Each agent node** executes: loads memory → runs registered tools → calls Gemini LLM (if key is set) → returns response.
 5. **Agent output** is persisted to `messages` + `execution_logs` tables and broadcast over WebSocket.
 6. **Frontend** receives real-time log events; status indicators update live.
 
@@ -245,7 +245,7 @@ Interactive docs at **http://localhost:8000/docs** (Swagger UI).
   "name": "Research Assistant",
   "role": "Web Researcher",
   "system_prompt": "You are an expert at finding and synthesizing information.",
-  "model": "gpt-4o-mini",
+  "model": "gemini-2.0-flash",
   "tools": ["calculator", "datetime_now", "random_fact"],
   "channels": ["telegram"],
   "memory_config": {},
@@ -337,7 +337,7 @@ POST /api/workflows/{id}/execute   {"input": "your prompt"}
 Each node:
 1. Loads agent config + memory from DB.
 2. Executes registered tools against the current input.
-3. Calls OpenAI LLM (if `OPENAI_API_KEY` set) to synthesize a natural-language response.
+3. Calls OpenAI LLM (if `GEMINI_API_KEY` set) to synthesize a natural-language response.
 4. Persists a `Message` and `ExecutionLog` row.
 5. Broadcasts a `step_completed` WebSocket event.
 
@@ -411,7 +411,7 @@ Test coverage areas:
 |----------|---------|----------|-------------|
 | `DATABASE_URL` | `sqlite:///./yuno_dev.db` | No | DB connection string |
 | `REDIS_URL` | `redis://localhost:6379/0` | No | Redis connection string |
-| `OPENAI_API_KEY` | _(empty)_ | No* | Enables real LLM responses |
+| `GEMINI_API_KEY` | _(empty)_ | No* | Enables real LLM responses |
 | `TELEGRAM_BOT_TOKEN` | _(empty)_ | No* | Enables Telegram bot |
 | `BACKEND_URL` | `http://localhost:8000` | No | Used for internal cross-service calls |
 | `FRONTEND_URL` | `http://localhost:3000` | No | CORS allow-list origin |
@@ -424,7 +424,7 @@ Test coverage areas:
 
 - **No authentication** — all API endpoints are unauthenticated (add Bearer token middleware for production).
 - **In-memory broadcaster** — WebSocket fan-out is per-process; horizontally scaling the backend requires a Redis pub/sub adapter.
-- **OpenAI only** — the LLM client targets OpenAI; add an Anthropic/Groq adapter in `executor.py` for other providers.
+- **Gemini only** — the LLM client targets Google Gemini; add an OpenAI/Anthropic adapter in `executor.py` for other providers.
 - **SQLite concurrency** — SQLite works for single-process dev; switch to PostgreSQL for multi-worker deployments.
 
 ---

@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./yuno_dev.db"
     redis_url: str = "redis://localhost:6379/0"
 
-    openai_api_key: str = ""
+    gemini_api_key: str = ""
     telegram_bot_token: str = ""
 
     backend_url: str = "http://localhost:8000"

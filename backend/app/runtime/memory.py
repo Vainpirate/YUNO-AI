@@ -7,8 +7,8 @@ class MemoryStore:
     """Per-agent in-process conversation memory with a sliding window.
 
     Messages are stored as plain strings in alternating user/assistant order.
-    The ``as_messages`` helper converts them to the OpenAI chat-completion
-    format so they can be forwarded directly to the LLM.
+    The ``as_messages`` helper converts them to a role/content dict list that
+    the executor translates into Gemini Content objects before each LLM call.
     """
 
     WINDOW: int = 20  # keep last N individual messages (10 turns)
@@ -38,11 +38,11 @@ class MemoryStore:
         return list(self._store[agent_id])
 
     def as_messages(self, agent_id: str) -> list[dict[str, str]]:
-        """Return history as an OpenAI-compatible message list.
+        """Return history as a role/content message list.
 
         Messages alternate user / assistant starting from the oldest entry.
-        The returned list can be prepended with a system message and sent
-        directly to ``openai.chat.completions.create``.
+        The executor converts these to Gemini Content objects (role "model"
+        instead of "assistant") before calling the Gemini API.
         """
         history = self.get(agent_id)
         messages: list[dict[str, str]] = []

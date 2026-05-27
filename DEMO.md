@@ -17,7 +17,7 @@ Before hitting record:
 - [ ] Telegram app open on phone / in browser (if demonstrating Telegram)
 - [ ] 3 seed agents already created (see [Seed Data](#seed-data) below)
 - [ ] 1 seed workflow already created (Research → Summarize)
-- [ ] `backend/.env` has `OPENAI_API_KEY` set for real LLM responses
+- [ ] `backend/.env` has `GEMINI_API_KEY` set for real LLM responses
 
 ---
 
@@ -31,7 +31,7 @@ curl -s -X POST http://localhost:8000/api/agents \
     "name": "Researcher",
     "role": "Web Researcher",
     "system_prompt": "You are an expert researcher. Find and synthesize information clearly.",
-    "model": "gpt-4o-mini",
+    "model": "gemini-2.0-flash",
     "tools": ["calculator", "datetime_now"],
     "channels": ["telegram"],
     "memory_config": {},
@@ -44,7 +44,7 @@ curl -s -X POST http://localhost:8000/api/agents \
     "name": "Summarizer",
     "role": "Content Summarizer",
     "system_prompt": "You condense information into clear, concise bullet-point summaries.",
-    "model": "gpt-4o-mini",
+    "model": "gemini-2.0-flash",
     "tools": ["word_count"],
     "channels": [],
     "memory_config": {},
@@ -57,7 +57,7 @@ curl -s -X POST http://localhost:8000/api/agents \
     "name": "Validator",
     "role": "Quality Checker",
     "system_prompt": "You review outputs and flag inconsistencies or low-quality responses.",
-    "model": "gpt-4o-mini",
+    "model": "gemini-2.0-flash",
     "tools": [],
     "channels": [],
     "memory_config": {},
@@ -99,7 +99,7 @@ curl -s -X POST http://localhost:8000/api/agents \
 - Name: `Calculator Bot`
 - Role: `Math Assistant`
 - System Prompt: `You are a precise math assistant. Use the calculator tool for all computations.`
-- Model: `gpt-4o-mini`
+- Model: `gemini-2.0-flash`
 - Tools: ✅ `calculator`
 - Channels: `(none)`
 
@@ -215,7 +215,7 @@ input, output, and tool calls.
 
 | Failure | Backup |
 |---------|--------|
-| OpenAI key not set | Agents return deterministic tool output — still demonstrates the pipeline |
+| Gemini key not set | Agents return deterministic tool output — still demonstrates the pipeline |
 | Telegram bot offline | Skip Scene 4; show message history from a pre-seeded DB |
 | WebSocket not streaming | Manually refresh `/monitor` to show persisted logs |
 | Docker compose fails | Fall back to `uvicorn app.main:app --reload` + `npm run dev` |

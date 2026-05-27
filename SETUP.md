@@ -49,7 +49,7 @@ cp backend/.env.example backend/.env
 
 Open `backend/.env` and set at minimum:
 ```
-OPENAI_API_KEY=sk-...          # optional — enables real LLM responses
+GEMINI_API_KEY=AIza...          # optional — enables real LLM responses
 TELEGRAM_BOT_TOKEN=123:abc...  # optional — enables Telegram bot
 ```
 
@@ -158,7 +158,7 @@ All variables are read from `backend/.env` by Pydantic Settings.
 | `APP_PORT` | `8000` | Uvicorn port |
 | `DATABASE_URL` | `sqlite:///./yuno_dev.db` | SQLAlchemy connection string |
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection string |
-| `OPENAI_API_KEY` | _(empty)_ | OpenAI API key — enables LLM synthesis |
+| `GEMINI_API_KEY` | _(empty)_ | Gemini API key — enables LLM synthesis |
 | `TELEGRAM_BOT_TOKEN` | _(empty)_ | Telegram bot token — enables polling |
 | `BACKEND_URL` | `http://localhost:8000` | Backend base URL (used internally) |
 | `FRONTEND_URL` | `http://localhost:3000` | CORS allow-list origin |
@@ -257,7 +257,7 @@ curl http://localhost:8000/api/health/redis
 # Create a test agent
 curl -s -X POST http://localhost:8000/api/agents \
   -H "Content-Type: application/json" \
-  -d '{"name":"Test","role":"echo","system_prompt":"Repeat the input.","model":"gpt-4o-mini","tools":[],"channels":[]}' \
+  -d '{"name":"Test","role":"echo","system_prompt":"Repeat the input.","model":"gemini-2.0-flash","tools":[],"channels":[]}' \
   | python -m json.tool
 
 # List agents

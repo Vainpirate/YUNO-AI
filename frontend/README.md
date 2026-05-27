@@ -123,7 +123,7 @@ const agent = await api.agents.create({
   name: 'Researcher',
   role: 'Web Researcher',
   system_prompt: '...',
-  model: 'gpt-4o-mini',
+  model: 'gemini-2.0-flash',
   tools: ['calculator'],
   channels: ['telegram'],
 });

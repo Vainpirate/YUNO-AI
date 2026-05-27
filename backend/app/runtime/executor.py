@@ -7,12 +7,12 @@ Design notes
   where an agent processes input and produces a response.
 
 * ``execute_agent`` / ``execute_workflow`` are **async** so they can:
-    - await OpenAI calls via the async client when available
+    - await Gemini calls via the async client when available
     - emit real-time WebSocket events via the broadcaster
     - be awaited directly from FastAPI async route handlers
 
 * LLM behaviour:
-    - If ``OPENAI_API_KEY`` is set, the async OpenAI client is used for
+    - If ``GEMINI_API_KEY`` is set, the async Google Gemini client is used for
       agents that have no matching tool for the input.
     - If the key is absent (CI, tests, local dev without a key), a harmless
       mock string is returned so the rest of the stack keeps working.
@@ -75,23 +75,23 @@ class RuntimeExecutor:
     def __init__(self) -> None:
         self.tools = ToolRegistry()
         self.memory = MemoryStore()
-        self._openai_client = None  # lazy-initialised AsyncOpenAI
+        self._gemini_client = None  # lazy-initialised google.genai.Client
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _get_openai_client(self):
-        """Return a cached AsyncOpenAI client, or None if no key is set."""
-        if self._openai_client is not None:
-            return self._openai_client
+    def _get_gemini_client(self):
+        """Return a cached google.genai.Client, or None if no key is set."""
+        if self._gemini_client is not None:
+            return self._gemini_client
         try:
             from app.config import settings
-            if not settings.openai_api_key:
+            if not settings.gemini_api_key:
                 return None
-            from openai import AsyncOpenAI
-            self._openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
-            return self._openai_client
+            from google import genai  # type: ignore[import]
+            self._gemini_client = genai.Client(api_key=settings.gemini_api_key)
+            return self._gemini_client
         except Exception:  # noqa: BLE001
             return None
 
@@ -150,20 +150,49 @@ class RuntimeExecutor:
         self,
         system_prompt: str,
         messages: list[dict],
-        model: str = "gpt-4o-mini",
+        model: str = "gemini-2.0-flash",
     ) -> str | None:
-        """Async LLM call.  Returns None if no client is configured."""
-        client = self._get_openai_client()
+        """Async LLM call via Google Gemini.  Returns None if no client is configured.
+
+        Converts the memory store's OpenAI-style message list
+        (``[{"role": "user"|"assistant", "content": "..."}]``) to the Gemini
+        Content format (``[{"role": "user"|"model", "parts": [{"text": "..."}]}]``).
+        The system prompt is passed via ``GenerateContentConfig.system_instruction``.
+        """
+        client = self._get_gemini_client()
         if client is None:
             return None
         try:
-            completion = await client.chat.completions.create(
+            from google.genai import types  # type: ignore[import]
+
+            # Convert OpenAI-style messages → Gemini Content objects
+            # Gemini uses "model" where OpenAI uses "assistant"
+            gemini_contents = [
+                types.Content(
+                    role="model" if msg["role"] == "assistant" else "user",
+                    parts=[types.Part(text=msg["content"])],
+                )
+                for msg in messages
+                if msg.get("content")
+            ]
+
+            # Gemini requires the conversation to start with a user turn
+            if not gemini_contents or gemini_contents[0].role != "user":
+                gemini_contents.insert(
+                    0,
+                    types.Content(role="user", parts=[types.Part(text="(start)")]),
+                )
+
+            response = await client.aio.models.generate_content(
                 model=model,
-                messages=[{"role": "system", "content": system_prompt}] + messages,
+                contents=gemini_contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                ),
             )
-            return completion.choices[0].message.content
+            return response.text
         except Exception as exc:  # noqa: BLE001
-            logger.warning("LLM call failed: %s", exc)
+            logger.warning("Gemini LLM call failed: %s", exc)
             return None
 
     # ------------------------------------------------------------------
@@ -194,7 +223,7 @@ class RuntimeExecutor:
             llm_response = await self._llm_call(
                 system_prompt=agent.system_prompt or "You are a helpful assistant.",
                 messages=self.memory.as_messages(str(agent.id)),
-                model=agent.model or "gpt-4o-mini",
+                model=agent.model or "gemini-2.0-flash",
             )
             if llm_response:
                 # Replace placeholder with real LLM output and update memory
