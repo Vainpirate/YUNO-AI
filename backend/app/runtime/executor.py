@@ -37,6 +37,7 @@ Design notes
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import defaultdict
 from collections.abc import Callable
@@ -152,7 +153,7 @@ class RuntimeExecutor:
         self,
         system_prompt: str,
         messages: list[dict],
-        model: str = "gemini-2.0-flash",
+        model: str = "gemini-2.5-flash",
     ) -> tuple[str | None, int]:
         """Async LLM call via Google Gemini.  Returns (text, tokens_used) tuple.
 
@@ -232,7 +233,7 @@ class RuntimeExecutor:
             llm_response, llm_tokens = await self._llm_call(
                 system_prompt=agent.system_prompt or "You are a helpful assistant.",
                 messages=self.memory.as_messages(str(agent.id)),
-                model=agent.model or "gemini-2.0-flash",
+                model=agent.model or "gemini-2.5-flash",
             )
             if llm_response:
                 # Replace placeholder with real LLM output and update memory
@@ -333,7 +334,7 @@ class RuntimeExecutor:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
-        # --- build and run LangGraph ---
+        # --- build and run LangGraph (async path) ---
         compiled = self._build_langgraph(workflow, agents_map)
         if compiled is not None:
             initial_state: WorkflowState = {
@@ -343,12 +344,13 @@ class RuntimeExecutor:
                 "step_outputs": [],
             }
             try:
-                final_state = compiled.invoke(initial_state)
+                # ainvoke is required — async node functions call _llm_call
+                final_state = await compiled.ainvoke(initial_state)
                 step_outputs: list[dict] = final_state.get("step_outputs", [])
                 final_output: str = final_state.get("final_output", "")
             except Exception as exc:  # noqa: BLE001
                 logger.error("LangGraph execution failed: %s", exc)
-                step_outputs, final_output = await self._fallback_sequential(db, agents_map, workflow)
+                step_outputs, final_output = await self._fallback_sequential(db, agents_map, workflow, initial_input)
         else:
             step_outputs, final_output = await self._fallback_sequential(db, agents_map, workflow, initial_input)
 
@@ -442,11 +444,72 @@ class RuntimeExecutor:
 
         graph = StateGraph(WFState)
 
-        # Add one node per valid agent
+        # Add one async node per valid agent.
+        # Each node: run tools synchronously, then call Gemini LLM asynchronously
+        # to synthesise a natural-language response from the tool output + prompt.
         for node_id in valid_nodes:
             agent = agents_map[node_id]
-            node_fn = make_agent_node(agent, self._run_agent_step)
-            graph.add_node(node_id, node_fn)
+
+            async def _make_async_node(state: WFState, _agent: Agent = agent) -> WFState:  # type: ignore[return]
+                current_input: str = state.get("current_input", "") or ""
+
+                # Snapshot memory BEFORE running tools so the LLM message list
+                # ends with a user turn (Gemini requires this).
+                prior_messages = self.memory.as_messages(str(_agent.id))
+
+                result = self._run_agent_step(_agent, current_input)
+
+                # Build a clean message for the LLM:
+                #   prior history + current user input + optional tool context
+                user_content = current_input
+                if result["tool_outputs"]:
+                    tool_ctx = "\n".join(
+                        f"[{t['tool']}]: {t['result']}" for t in result["tool_outputs"]
+                    )
+                    user_content += f"\n\nTool data available:\n{tool_ctx}"
+
+                llm_messages = prior_messages + [{"role": "user", "content": user_content}]
+
+                llm_response, llm_tokens = await self._llm_call(
+                    system_prompt=_agent.system_prompt or "You are a helpful assistant.",
+                    messages=llm_messages,
+                    model=_agent.model or "gemini-2.5-flash",
+                )
+                if llm_response:
+                    result["response"] = llm_response
+                    result["tokens_used"] = llm_tokens
+                else:
+                    logger.warning("LLM returned no response for agent %s", _agent.name)
+
+                # Small pause to respect per-minute rate limits across agents
+                await asyncio.sleep(2)
+
+                # Update memory with the real exchange (discard raw tool output)
+                self.memory.clear(str(_agent.id))
+                for m in prior_messages:
+                    self.memory.append(str(_agent.id), m["content"])
+                self.memory.append(str(_agent.id), current_input)
+                self.memory.append(str(_agent.id), result["response"])
+
+                # Emit live WebSocket event for this step
+                await _safe_publish_workflow(str(workflow.id), {
+                    "event": "agent_response",
+                    "agent": _agent.name,
+                    "response": result["response"],
+                    "tool_outputs": result.get("tool_outputs", []),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
+                return {
+                    "messages": list(state.get("messages", [])) + [
+                        {"role": "assistant", "name": _agent.name, "content": result["response"]}
+                    ],
+                    "current_input": result["response"],
+                    "final_output": result["response"],
+                    "step_outputs": list(state.get("step_outputs", [])) + [result],
+                }
+
+            graph.add_node(node_id, _make_async_node)
 
         # Entry point = first valid node
         graph.set_entry_point(valid_nodes[0])
@@ -521,11 +584,44 @@ class RuntimeExecutor:
         self, _db: Session, agents_map: dict[str, Agent], _workflow: Workflow,
         initial_input: str = "Workflow started",
     ) -> tuple[list[dict], str]:
-        """Simple ordered execution when LangGraph is unavailable."""
+        """Simple ordered execution when LangGraph is unavailable.
+
+        Mirrors the async node logic: tools run synchronously, then Gemini is
+        called to synthesise a natural-language response.
+        """
         step_outputs: list[dict] = []
         current_input = initial_input
         for agent in agents_map.values():
+            prior_messages = self.memory.as_messages(str(agent.id))
             result = self._run_agent_step(agent, current_input)
+
+            user_content = current_input
+            if result["tool_outputs"]:
+                tool_ctx = "\n".join(
+                    f"[{t['tool']}]: {t['result']}" for t in result["tool_outputs"]
+                )
+                user_content += f"\n\nTool data available:\n{tool_ctx}"
+
+            llm_response, llm_tokens = await self._llm_call(
+                system_prompt=agent.system_prompt or "You are a helpful assistant.",
+                messages=prior_messages + [{"role": "user", "content": user_content}],
+                model=agent.model or "gemini-2.5-flash",
+            )
+            if llm_response:
+                result["response"] = llm_response
+                result["tokens_used"] = llm_tokens
+            else:
+                logger.warning("LLM returned no response for agent %s", agent.name)
+
+            self.memory.clear(str(agent.id))
+            for m in prior_messages:
+                self.memory.append(str(agent.id), m["content"])
+            self.memory.append(str(agent.id), current_input)
+            self.memory.append(str(agent.id), result["response"])
+
+            # Small pause to respect per-minute rate limits across agents
+            await asyncio.sleep(2)
+
             current_input = result["response"]
             step_outputs.append(result)
         return step_outputs, current_input
