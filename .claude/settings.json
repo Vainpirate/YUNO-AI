@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem \"d:\\\\My Projects\\\\YUNO AI\" -Recurse -Depth 3)",
+      "Bash(Select-Object FullName, PSIsContainer)",
+      "Bash(Format-Table -AutoSize)"
+    ]
+  }
+}

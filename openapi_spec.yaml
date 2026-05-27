@@ -1,0 +1,357 @@
+﻿openapi: 3.0.3
+info:
+  title: AI Agent Orchestration Platform API
+  version: 1.0.0
+  description: API contract for agent, workflow, messaging, and execution monitoring.
+servers:
+  - url: http://localhost:8000
+paths:
+  /api/agents:
+    get:
+      summary: List agents
+      responses:
+        '200':
+          description: Agent list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Agent'
+    post:
+      summary: Create agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentCreate'
+      responses:
+        '201':
+          description: Agent created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+
+  /api/agents/{agent_id}:
+    get:
+      summary: Get agent by ID
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      responses:
+        '200':
+          description: Agent details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+    put:
+      summary: Update agent
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentUpdate'
+      responses:
+        '200':
+          description: Agent updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+    delete:
+      summary: Soft delete agent
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      responses:
+        '204':
+          description: Deleted
+
+  /api/workflows:
+    post:
+      summary: Create workflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowCreate'
+      responses:
+        '201':
+          description: Workflow created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+
+  /api/workflows/{workflow_id}:
+    get:
+      summary: Get workflow
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+      responses:
+        '200':
+          description: Workflow details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+    put:
+      summary: Update workflow
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkflowUpdate'
+      responses:
+        '200':
+          description: Updated workflow
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+
+  /api/workflows/{workflow_id}/execute:
+    post:
+      summary: Execute workflow
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+      responses:
+        '202':
+          description: Execution started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  execution_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    example: running
+
+  /api/messages/{workflow_id}:
+    get:
+      summary: Get workflow messages
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+      responses:
+        '200':
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Message'
+
+  /api/execution/{workflow_id}/logs:
+    get:
+      summary: Get execution logs for a workflow
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+      responses:
+        '200':
+          description: Logs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExecutionLog'
+
+  /ws/logs/{workflow_id}:
+    get:
+      summary: WebSocket stream for workflow logs
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+      responses:
+        '101':
+          description: Switching Protocols
+
+  /ws/agent-status/{agent_id}:
+    get:
+      summary: WebSocket stream for agent status transitions
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      responses:
+        '101':
+          description: Switching Protocols
+
+components:
+  parameters:
+    AgentId:
+      name: agent_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    WorkflowId:
+      name: workflow_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    Agent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        role:
+          type: string
+        system_prompt:
+          type: string
+        model:
+          type: string
+        tools:
+          type: array
+          items:
+            type: string
+        channels:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+
+    AgentCreate:
+      type: object
+      required: [name, role, system_prompt, model]
+      properties:
+        name:
+          type: string
+        role:
+          type: string
+        system_prompt:
+          type: string
+        model:
+          type: string
+        tools:
+          type: array
+          items:
+            type: string
+        channels:
+          type: array
+          items:
+            type: string
+
+    AgentUpdate:
+      allOf:
+        - $ref: '#/components/schemas/AgentCreate'
+
+    Workflow:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        dag:
+          type: object
+        version:
+          type: integer
+
+    WorkflowCreate:
+      type: object
+      required: [name, dag]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        dag:
+          type: object
+        template_name:
+          type: string
+
+    WorkflowUpdate:
+      allOf:
+        - $ref: '#/components/schemas/WorkflowCreate'
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        workflow_id:
+          type: string
+          format: uuid
+        from_agent_id:
+          type: string
+          format: uuid
+        to_agent_id:
+          type: string
+          format: uuid
+        channel:
+          type: string
+        content:
+          type: string
+        metadata:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+
+    ExecutionLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        execution_id:
+          type: string
+          format: uuid
+        workflow_id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+          format: uuid
+        step_name:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, success, error, cancelled]
+        input_payload:
+          type: object
+        output_payload:
+          type: object
+        tokens_used:
+          type: integer
+        cost_usd:
+          type: number
+        latency_ms:
+          type: integer
+        error:
+          type: string
+        created_at:
+          type: string
+          format: date-time
