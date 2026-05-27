@@ -1,58 +1,96 @@
-﻿openapi: 3.0.3
+openapi: 3.0.3
 info:
-  title: AI Agent Orchestration Platform API
-  version: 1.0.0
-  description: API contract for agent, workflow, messaging, and execution monitoring.
+  title: YUNO AI — Agent Orchestration Platform API
+  version: 1.1.0
+  description: |
+    REST + WebSocket API for the YUNO AI Agent Orchestration Platform.
+    Interactive docs: http://localhost:8000/docs
+
 servers:
   - url: http://localhost:8000
+    description: Local development
+
+tags:
+  - name: agents
+    description: Agent CRUD and single-agent execution
+  - name: workflows
+    description: Workflow CRUD, templates, and execution
+  - name: messages
+    description: Inter-agent and external message history
+  - name: execution
+    description: Per-workflow execution logs
+  - name: websocket
+    description: Real-time streaming (WebSocket upgrade)
+  - name: health
+    description: Service health checks
+
 paths:
+
+  # ── Agents ──────────────────────────────────────────────────────────────────
+
   /api/agents:
     get:
-      summary: List agents
+      tags: [agents]
+      summary: List all agents
       responses:
         '200':
-          description: Agent list
+          description: Array of agent objects
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Agent'
+                type: array
+                items:
+                  $ref: '#/components/schemas/Agent'
     post:
-      summary: Create agent
+      tags: [agents]
+      summary: Create a new agent
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/AgentCreate'
-      responses:
-        '201':
-          description: Agent created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Agent'
-
-  /api/agents/{agent_id}:
-    get:
-      summary: Get agent by ID
-      parameters:
-        - $ref: '#/components/parameters/AgentId'
+            example:
+              name: Researcher
+              role: Web Researcher
+              system_prompt: You are an expert researcher.
+              model: gpt-4o-mini
+              tools: [calculator, datetime_now]
+              channels: [telegram]
+              memory_config: {}
+              guardrails: {}
       responses:
         '200':
-          description: Agent details
+          description: Created agent
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Agent'
+        '409':
+          description: Agent name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/agents/{agent_id}:
+    parameters:
+      - $ref: '#/components/parameters/AgentId'
+    get:
+      tags: [agents]
+      summary: Get agent by ID
+      responses:
+        '200':
+          description: Agent object
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '404':
+          $ref: '#/components/responses/NotFound'
     put:
-      summary: Update agent
-      parameters:
-        - $ref: '#/components/parameters/AgentId'
+      tags: [agents]
+      summary: Update agent (only provided fields are changed)
       requestBody:
         required: true
         content:
@@ -61,22 +99,144 @@ paths:
               $ref: '#/components/schemas/AgentUpdate'
       responses:
         '200':
-          description: Agent updated
+          description: Updated agent
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Agent'
+        '404':
+          $ref: '#/components/responses/NotFound'
     delete:
-      summary: Soft delete agent
+      tags: [agents]
+      summary: Delete agent
+      responses:
+        '200':
+          description: Deletion confirmed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: deleted
+                  agent_id:
+                    type: string
+                    format: uuid
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/agents/{agent_id}/tools:
+    patch:
+      tags: [agents]
+      summary: Replace agent tool list
       parameters:
         - $ref: '#/components/parameters/AgentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tools]
+              properties:
+                tools:
+                  type: array
+                  items:
+                    type: string
+                  example: [calculator, datetime_now]
       responses:
-        '204':
-          description: Deleted
+        '200':
+          description: Updated agent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/agents/{agent_id}/channels:
+    patch:
+      tags: [agents]
+      summary: Replace agent channel list
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channels]
+              properties:
+                channels:
+                  type: array
+                  items:
+                    type: string
+                  example: [telegram]
+      responses:
+        '200':
+          description: Updated agent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/agents/{agent_id}/execute:
+    post:
+      tags: [agents]
+      summary: Execute a single agent
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                input:
+                  type: string
+                  description: Prompt / user message
+                  example: What is 42 * 7?
+                workflow_id:
+                  type: string
+                  format: uuid
+                  description: Associate execution with a workflow (optional)
+      responses:
+        '200':
+          description: Execution result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentExecutionResult'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Workflows ────────────────────────────────────────────────────────────────
 
   /api/workflows:
+    get:
+      tags: [workflows]
+      summary: List all workflows
+      responses:
+        '200':
+          description: Array of workflow objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Workflow'
     post:
-      summary: Create workflow
+      tags: [workflows]
+      summary: Create a workflow
       requestBody:
         required: true
         content:
@@ -84,29 +244,45 @@ paths:
             schema:
               $ref: '#/components/schemas/WorkflowCreate'
       responses:
-        '201':
-          description: Workflow created
+        '200':
+          description: Created workflow
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Workflow'
 
-  /api/workflows/{workflow_id}:
+  /api/workflows/templates:
     get:
-      summary: Get workflow
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
+      tags: [workflows]
+      summary: List built-in workflow templates
       responses:
         '200':
-          description: Workflow details
+          description: Array of template descriptors
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/WorkflowTemplate'
+
+  /api/workflows/{workflow_id}:
+    parameters:
+      - $ref: '#/components/parameters/WorkflowId'
+    get:
+      tags: [workflows]
+      summary: Get workflow by ID
+      responses:
+        '200':
+          description: Workflow object
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Workflow'
+        '404':
+          $ref: '#/components/responses/NotFound'
     put:
+      tags: [workflows]
       summary: Update workflow
-      parameters:
-        - $ref: '#/components/parameters/WorkflowId'
       requestBody:
         required: true
         content:
@@ -120,82 +296,201 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Workflow'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/workflows/{workflow_id}/execute:
     post:
-      summary: Execute workflow
+      tags: [workflows]
+      summary: Execute a workflow end-to-end
+      description: |
+        Compiles the workflow DAG into a LangGraph StateGraph and invokes it.
+        Each agent node persists a Message + ExecutionLog row and broadcasts
+        a WebSocket event to /ws/logs/{workflow_id}.
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                input:
+                  type: string
+                  description: Initial prompt passed to the first agent node
+                  example: What are the latest breakthroughs in AI in 2024?
+      responses:
+        '200':
+          description: Execution result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowExecutionResult'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/workflows/{workflow_id}/status:
+    get:
+      tags: [workflows]
+      summary: Get in-memory execution status
       parameters:
         - $ref: '#/components/parameters/WorkflowId'
       responses:
-        '202':
-          description: Execution started
+        '200':
+          description: Status object
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  execution_id:
+                  workflow_id:
                     type: string
                     format: uuid
                   status:
                     type: string
-                    example: running
+                    enum: [running, completed, error, unknown]
+
+  # ── Messages ─────────────────────────────────────────────────────────────────
 
   /api/messages/{workflow_id}:
     get:
-      summary: Get workflow messages
+      tags: [messages]
+      summary: Get message history for a workflow (chronological)
       parameters:
         - $ref: '#/components/parameters/WorkflowId'
       responses:
         '200':
-          description: Messages
+          description: Ordered message array
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Message'
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+
+  # ── Execution Logs ───────────────────────────────────────────────────────────
 
   /api/execution/{workflow_id}/logs:
     get:
-      summary: Get execution logs for a workflow
+      tags: [execution]
+      summary: Get execution logs for a workflow (chronological)
       parameters:
         - $ref: '#/components/parameters/WorkflowId'
       responses:
         '200':
-          description: Logs
+          description: Ordered log array
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/ExecutionLog'
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExecutionLog'
+
+  # ── WebSocket ────────────────────────────────────────────────────────────────
 
   /ws/logs/{workflow_id}:
     get:
-      summary: WebSocket stream for workflow logs
+      tags: [websocket]
+      summary: Subscribe to workflow execution log stream (WebSocket)
+      description: |
+        Upgrade to WebSocket. Events emitted:
+        - on connect:       {"workflow_id":"…","status":"connected"}
+        - workflow_started: {"event":"workflow_started","agent_count":N}
+        - step_completed:   {"event":"step_completed","agent":"…","response":"…","tool_outputs":[…]}
+        - workflow_completed: {"event":"workflow_completed","final_output":"…","steps":N}
       parameters:
-        - $ref: '#/components/parameters/WorkflowId'
+        - name: workflow_id
+          in: path
+          required: true
+          schema:
+            type: string
       responses:
         '101':
           description: Switching Protocols
 
   /ws/agent-status/{agent_id}:
     get:
-      summary: WebSocket stream for agent status transitions
+      tags: [websocket]
+      summary: Subscribe to agent state updates (WebSocket)
+      description: |
+        Events emitted:
+        - on connect: {"agent_id":"…","status":"connected"}
+        - running:    {"status":"running","agent":"…"}
+        - idle:       {"status":"idle","agent":"…","response_preview":"…"}
       parameters:
-        - $ref: '#/components/parameters/AgentId'
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
       responses:
         '101':
           description: Switching Protocols
 
+  # ── Health ───────────────────────────────────────────────────────────────────
+
+  /api/health:
+    get:
+      tags: [health]
+      summary: Application alive check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  env:
+                    type: string
+                    example: development
+
+  /api/health/db:
+    get:
+      tags: [health]
+      summary: Database connectivity check
+      responses:
+        '200':
+          description: DB status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, error]
+                  db:
+                    type: string
+                    example: connected
+
+  /api/health/redis:
+    get:
+      tags: [health]
+      summary: Redis connectivity check
+      responses:
+        '200':
+          description: Redis status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, degraded]
+                  redis:
+                    type: string
+                    example: connected
+
+# ── Reusable components ───────────────────────────────────────────────────────
+
 components:
+
   parameters:
     AgentId:
       name: agent_id
@@ -212,7 +507,28 @@ components:
         type: string
         format: uuid
 
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadRequest:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
   schemas:
+
+    Error:
+      type: object
+      properties:
+        detail:
+          type: string
+
     Agent:
       type: object
       properties:
@@ -227,6 +543,7 @@ components:
           type: string
         model:
           type: string
+          example: gpt-4o-mini
         tools:
           type: array
           items:
@@ -235,12 +552,46 @@ components:
           type: array
           items:
             type: string
-        status:
+        memory_config:
+          type: object
+        guardrails:
+          type: object
+        created_at:
           type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
 
     AgentCreate:
       type: object
-      required: [name, role, system_prompt, model]
+      required: [name]
+      properties:
+        name:
+          type: string
+        role:
+          type: string
+        system_prompt:
+          type: string
+        model:
+          type: string
+          default: gpt-4o-mini
+        tools:
+          type: array
+          items:
+            type: string
+        channels:
+          type: array
+          items:
+            type: string
+        memory_config:
+          type: object
+        guardrails:
+          type: object
+
+    AgentUpdate:
+      type: object
+      description: All fields optional — only provided fields are updated
       properties:
         name:
           type: string
@@ -258,10 +609,28 @@ components:
           type: array
           items:
             type: string
+        memory_config:
+          type: object
+        guardrails:
+          type: object
 
-    AgentUpdate:
-      allOf:
-        - $ref: '#/components/schemas/AgentCreate'
+    AgentExecutionResult:
+      type: object
+      properties:
+        agent_id:
+          type: string
+          format: uuid
+        response:
+          type: string
+        tool_outputs:
+          type: array
+          items:
+            type: object
+            properties:
+              tool:
+                type: string
+              result:
+                type: string
 
     Workflow:
       type: object
@@ -273,27 +642,97 @@ components:
           type: string
         description:
           type: string
-        dag:
+        agents:
+          type: array
+          items:
+            type: string
+            format: uuid
+        graph:
           type: object
-        version:
-          type: integer
+          properties:
+            nodes:
+              type: array
+              items:
+                type: string
+            edges:
+              type: array
+              items:
+                type: array
+                items:
+                  type: string
+        schedule:
+          type: string
+          nullable: true
+        template_name:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
 
     WorkflowCreate:
       type: object
-      required: [name, dag]
+      required: [name]
       properties:
         name:
           type: string
         description:
           type: string
-        dag:
+        agents:
+          type: array
+          items:
+            type: string
+            format: uuid
+        graph:
           type: object
+        schedule:
+          type: string
+          nullable: true
         template_name:
           type: string
+          nullable: true
 
     WorkflowUpdate:
-      allOf:
-        - $ref: '#/components/schemas/WorkflowCreate'
+      type: object
+      description: All fields optional
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        agents:
+          type: array
+          items:
+            type: string
+        graph:
+          type: object
+        schedule:
+          type: string
+
+    WorkflowTemplate:
+      type: object
+      properties:
+        name:
+          type: string
+          example: research_summarize
+        description:
+          type: string
+        graph:
+          type: object
+
+    WorkflowExecutionResult:
+      type: object
+      properties:
+        workflow_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [completed, error]
+        final_output:
+          type: string
+        steps:
+          type: integer
 
     Message:
       type: object
@@ -301,17 +740,21 @@ components:
         id:
           type: string
           format: uuid
-        workflow_id:
-          type: string
-          format: uuid
         from_agent_id:
           type: string
           format: uuid
+          nullable: true
         to_agent_id:
           type: string
           format: uuid
+          nullable: true
+        workflow_id:
+          type: string
+          format: uuid
+          nullable: true
         channel:
           type: string
+          example: internal
         content:
           type: string
         metadata:
@@ -326,32 +769,30 @@ components:
         id:
           type: string
           format: uuid
-        execution_id:
-          type: string
-          format: uuid
         workflow_id:
           type: string
           format: uuid
+          nullable: true
         agent_id:
           type: string
           format: uuid
+          nullable: true
         step_name:
           type: string
         status:
           type: string
-          enum: [pending, running, success, error, cancelled]
-        input_payload:
+          enum: [success, error, running]
+        input:
           type: object
-        output_payload:
+        output:
           type: object
         tokens_used:
           type: integer
-        cost_usd:
+        cost:
           type: number
-        latency_ms:
-          type: integer
         error:
           type: string
+          nullable: true
         created_at:
           type: string
           format: date-time

@@ -280,15 +280,113 @@ Interactive docs at **http://localhost:8000/docs** (Swagger UI).
 
 ---
 
-## Workflow Templates
+## Workflow Creation
 
-Three built-in templates available via `GET /api/workflows/templates`:
+### Using the Builder
+
+1. **Navigate** to `/workflows` → click **+ New Workflow**.
+2. **Pick a template** (or start blank): the canvas pre-populates with nodes.
+3. **Drag agents** from the left sidebar onto the canvas to add them.
+4. **Draw edges**: click and drag from one agent's handle to another to create a connection.
+5. **Set a name** in the top-left input, then **Save**.
+6. **Execute**: click the ▶ **Execute** button, optionally type an initial prompt, and watch logs stream live in the Monitor panel.
+
+### Workflow Templates
+
+Three built-in templates are available via `GET /api/workflows/templates`:
 
 | Template | Agents | Description |
 |----------|--------|-------------|
 | `research_summarize` | 2 | Researcher → Summarizer |
 | `qa_router` | 2 | Router → Specialist |
 | `research_summarize_validate` | 3 | Researcher → Summarizer → Validator |
+
+### Workflow JSON Structure
+
+Each workflow stores a `graph` field that drives LangGraph compilation:
+
+```json
+{
+  "name": "My Pipeline",
+  "agents": ["<agent-uuid-1>", "<agent-uuid-2>"],
+  "graph": {
+    "nodes": ["<agent-uuid-1>", "<agent-uuid-2>"],
+    "edges": [["<agent-uuid-1>", "<agent-uuid-2>"]]
+  }
+}
+```
+
+- `nodes` — ordered list of agent UUIDs; the first node is the graph entry point.
+- `edges` — list of `[source_uuid, target_uuid]` pairs; any node with no outgoing edge routes to `END`.
+
+### Execution Model
+
+```
+POST /api/workflows/{id}/execute   {"input": "your prompt"}
+         │
+         ▼ LangGraph StateGraph.invoke()
+    Node 1 (Agent A): receives initial_input
+         │  response
+         ▼
+    Node 2 (Agent B): receives Agent A's response as its input
+         │  response
+         ▼
+        END
+```
+
+Each node:
+1. Loads agent config + memory from DB.
+2. Executes registered tools against the current input.
+3. Calls OpenAI LLM (if `OPENAI_API_KEY` set) to synthesize a natural-language response.
+4. Persists a `Message` and `ExecutionLog` row.
+5. Broadcasts a `step_completed` WebSocket event.
+
+---
+
+## Messaging Integration
+
+### Telegram
+
+| Step | Action |
+|------|--------|
+| 1 | Create a bot via [@BotFather](https://t.me/botfather) → copy the token |
+| 2 | Set `TELEGRAM_BOT_TOKEN=<token>` in `backend/.env` |
+| 3 | Start the platform — the bot polls automatically on startup |
+| 4 | Send `/start` to your bot — routed to the first active agent |
+| 5 | Send any text — the agent responds and the exchange appears in the UI |
+
+**User → Agent mapping:** by default the first active agent handles all Telegram messages. Use `/config` inside Telegram to bind a specific agent to your chat ID.
+
+**Inbound flow:**
+```
+Telegram user sends message
+     │
+     ▼ telegram_bot.py:handle_message()
+     ├─ fetch agent for user
+     ├─ runtime_executor.execute_agent(db, agent, text)
+     ├─ send response back via Telegram API
+     ├─ persist to message_history table
+     └─ broadcast WebSocket event to UI monitor
+```
+
+### WhatsApp (via Twilio — optional)
+
+1. Sign up for a [Twilio](https://www.twilio.com) account and enable the WhatsApp sandbox.
+2. Set environment variables:
+   ```
+   TWILIO_ACCOUNT_SID=ACxxx
+   TWILIO_AUTH_TOKEN=xxx
+   TWILIO_WHATSAPP_NUMBER=+14155238886
+   ```
+3. Implement the webhook handler (see [EXTENDING.md](EXTENDING.md#2-adding-a-new-messaging-channel)).
+4. Point your Twilio sandbox webhook URL to:
+   ```
+   https://your-domain/webhooks/whatsapp
+   ```
+
+### Slack (custom integration)
+
+See [EXTENDING.md](EXTENDING.md#2-adding-a-new-messaging-channel) for the full Slack Events API integration guide.
 
 ---
 
@@ -337,6 +435,20 @@ See [EXTENDING.md](EXTENDING.md) for step-by-step guides on:
 - Adding new tools
 - Adding new messaging channels (WhatsApp, Slack)
 - Adding custom workflow templates
+
+---
+
+## Contributors
+
+| Role | Phase | Responsibility |
+|------|-------|----------------|
+| **ARCHITECT** | Phase 1 | Tech stack decisions, DB schema, API contract, wireframes |
+| **BACKEND_ENGINEER** | Phase 2 | FastAPI routes, LangGraph runtime, persistence layer, tests |
+| **FRONTEND_ENGINEER** | Phase 3 | React UI, ReactFlow canvas, WebSocket hooks, Zustand state |
+| **INTEGRATION_SPECIALIST** | Phase 4 | Telegram bot, Redis messaging bus, external tools |
+| **DEVOPS_AGENT** | Phase 5 | Docker Compose, Dockerfiles, env config, health checks |
+| **DEMO_LEAD** | Phase 6 | Scenario validation, documentation, demo script |
+| **DOCUMENTATION** | Phase 7 | README, API spec, setup guide, sub-READMEs |
 
 ---
 
