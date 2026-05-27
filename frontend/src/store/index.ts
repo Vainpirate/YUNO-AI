@@ -24,6 +24,7 @@ interface AppState {
   workflows: Workflow[];
   setWorkflows: (workflows: Workflow[]) => void;
   upsertWorkflow: (wf: Workflow) => void;
+  removeWorkflow: (id: string) => void;
 
   // Toasts
   toasts: Toast[];
@@ -58,6 +59,7 @@ export const useAppStore = create<AppState>((set) => ({
     }
     return { workflows: [wf, ...s.workflows] };
   }),
+  removeWorkflow:  (id)        => set((s) => ({ workflows: s.workflows.filter(w => w.id !== id) })),
 
   // ── toasts ──
   toasts: [],

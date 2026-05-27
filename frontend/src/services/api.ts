@@ -36,7 +36,9 @@ export const workflowApi = {
   create:    (data: WorkflowCreate)        => http.post<Workflow>("/workflows", data).then(r => r.data),
   update:    (id: string, data: Partial<WorkflowCreate>) =>
                                               http.put<Workflow>(`/workflows/${id}`, data).then(r => r.data),
-  execute:   (id: string)                  => http.post<ExecutionResult>(`/workflows/${id}/execute`).then(r => r.data),
+  remove:    (id: string)                  => http.delete(`/workflows/${id}`).then(r => r.data),
+  execute:   (id: string, input?: string)  => http.post<ExecutionResult>(`/workflows/${id}/execute`,
+                                              input ? { input } : undefined).then(r => r.data),
   status:    (id: string)                  => http.get<{ workflow_id: string; status: string }>(`/workflows/${id}/status`).then(r => r.data),
   templates: ()                            => http.get<WorkflowTemplate[]>("/workflows/templates").then(r => r.data),
 };

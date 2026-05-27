@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Plus, GitBranch, ChevronRight } from "lucide-react";
+import { Plus, GitBranch, ChevronRight, Trash2 } from "lucide-react";
 import { WorkflowBuilder } from "../components/WorkflowBuilder";
 import { MessageHistory } from "../components/MessageHistory";
 import { ExecutionMonitor } from "../components/ExecutionMonitor";
@@ -11,10 +11,27 @@ import type { Workflow } from "../types";
 type Panel = "builder" | "messages" | "monitor";
 
 export function WorkflowStudio() {
-  const { agents, setAgents, workflows, setWorkflows, pushToast } = useAppStore();
-  const [selected, setSelected] = useState<Workflow | null>(null);
-  const [panel,    setPanel]    = useState<Panel>("builder");
-  const [loading,  setLoading]  = useState(true);
+  const { agents, setAgents, workflows, setWorkflows, removeWorkflow, pushToast } = useAppStore();
+  const [selected,  setSelected]  = useState<Workflow | null>(null);
+  const [panel,     setPanel]     = useState<Panel>("builder");
+  const [loading,   setLoading]   = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  async function handleDeleteWorkflow(e: React.MouseEvent, wf: Workflow) {
+    e.stopPropagation(); // don't select the workflow while deleting
+    if (!window.confirm(`Delete workflow "${wf.name}"? This cannot be undone.`)) return;
+    setDeletingId(wf.id);
+    try {
+      await workflowApi.remove(wf.id);
+      removeWorkflow(wf.id);
+      if (selected?.id === wf.id) { setSelected(null); setPanel("builder"); }
+      pushToast(`Workflow "${wf.name}" deleted`, "success");
+    } catch (err: any) {
+      pushToast(err?.response?.data?.detail ?? "Delete failed", "error");
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   useEffect(() => {
     Promise.all([agentApi.list(), workflowApi.list()])
@@ -54,18 +71,33 @@ export function WorkflowStudio() {
             </div>
           </button>
           {workflows.map(wf => (
-            <button key={wf.id}
-              onClick={() => { setSelected(wf); setPanel("builder"); }}
-              className={`w-full text-left px-3 py-2 rounded-lg text-sm border transition
-                ${selected?.id === wf.id ? "border-brand-300 bg-brand-50 text-brand-700" : "border-transparent hover:bg-slate-50 text-slate-600"}`}
-            >
-              <div className="flex items-center gap-2">
-                <GitBranch size={13} className="shrink-0" />
-                <span className="truncate font-medium">{wf.name}</span>
-                <ChevronRight size={12} className="ml-auto shrink-0 opacity-50" />
-              </div>
-              <p className="text-xs text-slate-400 mt-0.5 ml-5 truncate">{wf.agents.length} agent(s)</p>
-            </button>
+            <div key={wf.id} className="group relative">
+              <button
+                onClick={() => { setSelected(wf); setPanel("builder"); }}
+                className={`w-full text-left px-3 py-2 rounded-lg text-sm border transition pr-8
+                  ${selected?.id === wf.id ? "border-brand-300 bg-brand-50 text-brand-700" : "border-transparent hover:bg-slate-50 text-slate-600"}`}
+              >
+                <div className="flex items-center gap-2">
+                  <GitBranch size={13} className="shrink-0" />
+                  <span className="truncate font-medium">{wf.name}</span>
+                  <ChevronRight size={12} className="ml-auto shrink-0 opacity-50" />
+                </div>
+                <p className="text-xs text-slate-400 mt-0.5 ml-5 truncate">{wf.agents.length} agent(s)</p>
+              </button>
+              {/* Delete button — visible on row hover */}
+              <button
+                onClick={(e) => handleDeleteWorkflow(e, wf)}
+                disabled={deletingId === wf.id}
+                title="Delete workflow"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded
+                  text-slate-300 hover:text-red-500 hover:bg-red-50
+                  opacity-0 group-hover:opacity-100 transition disabled:opacity-50"
+              >
+                {deletingId === wf.id
+                  ? <Spinner size={12} />
+                  : <Trash2 size={12} />}
+              </button>
+            </div>
           ))}
         </div>
       </aside>

@@ -11,7 +11,7 @@ interface Props {
 }
 
 const EMPTY: AgentCreate = {
-  name: "", role: "", system_prompt: "", model: "gpt-4o-mini",
+  name: "", role: "", system_prompt: "", model: "gemini-2.0-flash",
   tools: [], channels: [], memory_config: {}, guardrails: {},
 };
 
@@ -28,7 +28,7 @@ export function AgentForm({ open, initial, onSave, onClose }: Props) {
     if (open) {
       setForm(initial
         ? { name: initial.name, role: initial.role ?? "", system_prompt: initial.system_prompt ?? "",
-            model: initial.model ?? "gpt-4o-mini", tools: initial.tools, channels: initial.channels,
+            model: initial.model ?? "gemini-2.0-flash", tools: initial.tools, channels: initial.channels,
             memory_config: initial.memory_config, guardrails: initial.guardrails }
         : EMPTY);
       setErr(null);

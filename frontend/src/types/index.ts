@@ -106,6 +106,22 @@ export interface ToolOutput {
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 
-export const AVAILABLE_TOOLS = ["calculator", "web_search"] as const;
-export const AVAILABLE_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4", "gpt-3.5-turbo"] as const;
+export const AVAILABLE_TOOLS = [
+  "calculator",
+  "datetime_now",
+  "json_format",
+  "random_fact",
+  "url_fetch",
+  "web_search",
+  "word_count",
+] as const;
+
+export const AVAILABLE_MODELS = [
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro",
+  "gemini-2.5-flash-preview-05-20",
+] as const;
+
 export const AVAILABLE_CHANNELS = ["telegram", "slack", "webhook"] as const;

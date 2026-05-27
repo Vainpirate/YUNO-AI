@@ -83,6 +83,18 @@ def update_workflow(workflow_id: UUID, payload: WorkflowUpdate, db: Session = De
     return workflow
 
 
+@router.delete("/{workflow_id}")
+def delete_workflow(workflow_id: UUID, db: Session = Depends(get_db)):
+    """Delete a workflow and remove its in-memory execution state."""
+    workflow = db.get(Workflow, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    db.delete(workflow)
+    db.commit()
+    _execution_state.pop(str(workflow_id), None)
+    return {"status": "deleted", "workflow_id": str(workflow_id)}
+
+
 @router.post("/{workflow_id}/execute")
 async def execute_workflow(
     workflow_id: UUID,
