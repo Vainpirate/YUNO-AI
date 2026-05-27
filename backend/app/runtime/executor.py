@@ -38,6 +38,8 @@ Design notes
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -237,8 +239,7 @@ class RuntimeExecutor:
                 result["response"] = llm_response
                 # Overwrite the last two memory entries with the real response
                 self.memory.clear(str(agent.id))
-                for msg in self.memory.as_messages(str(agent.id))[:-2]:
-                    pass  # already cleared; re-append will happen below
+                # memory was cleared; re-append the real exchange
                 self.memory.append(str(agent.id), user_input)
                 self.memory.append(str(agent.id), llm_response)
 
@@ -431,7 +432,6 @@ class RuntimeExecutor:
             return None
 
         # Define state schema as a plain dict (TypedDict-compatible)
-        from typing import Any
         from typing_extensions import TypedDict  # type: ignore[import]
 
         class WFState(TypedDict):
@@ -451,16 +451,62 @@ class RuntimeExecutor:
         # Entry point = first valid node
         graph.set_entry_point(valid_nodes[0])
 
-        # Add explicit edges from graph descriptor
-        added_src: set[str] = set()
-        for edge in edges:
-            if len(edge) == 2:
-                src, dst = str(edge[0]), str(edge[1])
-                if src in agents_map and dst in agents_map:
-                    graph.add_edge(src, dst)
-                    added_src.add(src)
+        # ── Group edges by source node ─────────────────────────────────
+        # Each edge may be:
+        #   [src, dst]            — unconditional
+        #   [src, dst, condition] — conditional; "condition" is a plain
+        #                           keyword/phrase checked against the
+        #                           previous agent's output (case-insensitive
+        #                           substring match).
+        # ──────────────────────────────────────────────────────────────────
 
-        # Any node without an outgoing edge terminates the graph
+        # outgoing[src] = list of (dst, condition_or_None)
+        outgoing: dict[str, list[tuple[str, str | None]]] = defaultdict(list)
+        for edge in edges:
+            if len(edge) < 2:
+                continue
+            src, dst = str(edge[0]), str(edge[1])
+            condition: str | None = str(edge[2]).strip() if len(edge) >= 3 and edge[2] else None
+            if src in agents_map and dst in agents_map:
+                outgoing[src].append((dst, condition))
+
+        added_src: set[str] = set()
+
+        for src, targets in outgoing.items():
+            cond_targets  = [(dst, cond) for dst, cond in targets if cond]
+            plain_targets = [dst for dst, cond in targets if not cond]
+            default_next  = plain_targets[0] if plain_targets else END
+
+            if cond_targets:
+                # Build a routing function that checks the last agent output
+                # against each condition keyword, falling back to default_next.
+                all_dests = {dst for dst, _ in cond_targets} | {default_next}
+
+                def _make_router(
+                    cond_edges: list[tuple[str, str]],
+                    fallback: str,
+                ) -> "Callable[[WFState], str]":
+                    def _router(state: WFState) -> str:  # type: ignore[return]
+                        last_output = (state.get("final_output") or "").lower()
+                        for target, keyword in cond_edges:
+                            if keyword.lower() in last_output:
+                                return target
+                        return fallback
+                    return _router
+
+                graph.add_conditional_edges(
+                    src,
+                    _make_router(cond_targets, default_next),
+                    {d: d for d in all_dests},
+                )
+            else:
+                # Simple unconditional edge(s)
+                for dst in plain_targets:
+                    graph.add_edge(src, dst)
+
+            added_src.add(src)
+
+        # Any node with no explicit outgoing edge → END
         for node_id in valid_nodes:
             if node_id not in added_src:
                 graph.add_edge(node_id, END)
@@ -472,7 +518,7 @@ class RuntimeExecutor:
     # ------------------------------------------------------------------
 
     async def _fallback_sequential(
-        self, db: Session, agents_map: dict[str, Agent], workflow: Workflow,
+        self, _db: Session, agents_map: dict[str, Agent], _workflow: Workflow,
         initial_input: str = "Workflow started",
     ) -> tuple[list[dict], str]:
         """Simple ordered execution when LangGraph is unavailable."""
