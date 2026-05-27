@@ -44,6 +44,28 @@ def list_workflow_templates():
                 "edges": [["researcher", "summarizer"], ["summarizer", "validator"]],
             },
         },
+        {
+            "name": "it_service_automation",
+            "description": (
+                "IT Service Automation: client brief → requirement analysis → scope estimation "
+                "→ proposal generation → task planning → client communication."
+            ),
+            "graph": {
+                "nodes": [
+                    "requirement_analysis",
+                    "scope_estimation",
+                    "proposal_generator",
+                    "task_planner",
+                    "client_communication",
+                ],
+                "edges": [
+                    ["requirement_analysis", "scope_estimation"],
+                    ["scope_estimation", "proposal_generator"],
+                    ["proposal_generator", "task_planner"],
+                    ["task_planner", "client_communication"],
+                ],
+            },
+        },
     ]
 
 
