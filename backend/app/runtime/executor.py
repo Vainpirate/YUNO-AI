@@ -258,7 +258,7 @@ class RuntimeExecutor:
             "tool_outputs": result["tool_outputs"],
         }
 
-    async def execute_workflow(self, db: Session, workflow: Workflow) -> dict:
+    async def execute_workflow(self, db: Session, workflow: Workflow, initial_input: str = "Workflow started") -> dict:
         """Execute a multi-agent workflow using a LangGraph StateGraph.
 
         1. Resolves all agents referenced in the workflow.
@@ -297,7 +297,7 @@ class RuntimeExecutor:
         if compiled is not None:
             initial_state: WorkflowState = {
                 "messages": [],
-                "current_input": "Workflow started",
+                "current_input": initial_input,
                 "final_output": "",
                 "step_outputs": [],
             }
@@ -309,7 +309,7 @@ class RuntimeExecutor:
                 logger.error("LangGraph execution failed: %s", exc)
                 step_outputs, final_output = await self._fallback_sequential(db, agents_map, workflow)
         else:
-            step_outputs, final_output = await self._fallback_sequential(db, agents_map, workflow)
+            step_outputs, final_output = await self._fallback_sequential(db, agents_map, workflow, initial_input)
 
         # --- persist results ---
         for step in step_outputs:
@@ -429,11 +429,12 @@ class RuntimeExecutor:
     # ------------------------------------------------------------------
 
     async def _fallback_sequential(
-        self, db: Session, agents_map: dict[str, Agent], workflow: Workflow
+        self, db: Session, agents_map: dict[str, Agent], workflow: Workflow,
+        initial_input: str = "Workflow started",
     ) -> tuple[list[dict], str]:
         """Simple ordered execution when LangGraph is unavailable."""
         step_outputs: list[dict] = []
-        current_input = "Workflow started"
+        current_input = initial_input
         for agent in agents_map.values():
             result = self._run_agent_step(agent, current_input)
             current_input = result["response"]

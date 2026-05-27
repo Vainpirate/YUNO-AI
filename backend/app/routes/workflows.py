@@ -84,20 +84,31 @@ def update_workflow(workflow_id: UUID, payload: WorkflowUpdate, db: Session = De
 
 
 @router.post("/{workflow_id}/execute")
-async def execute_workflow(workflow_id: UUID, db: Session = Depends(get_db)):
+async def execute_workflow(
+    workflow_id: UUID,
+    payload: dict = None,
+    db: Session = Depends(get_db),
+):
     """Trigger workflow execution.
+
+    Accepts an optional JSON body ``{"input": "your prompt here"}`` that
+    seeds the first agent's context.  Defaults to ``"Workflow started"``
+    when omitted.
 
     The route is **async** so the executor can:
     * run the LangGraph StateGraph (await ainvoke)
     * await optional per-step OpenAI LLM calls
     * stream real-time WebSocket log events to UI subscribers
     """
+    from fastapi import Body  # local import to avoid circular at module level
     workflow = db.get(Workflow, workflow_id)
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    initial_input = (payload or {}).get("input", "Workflow started")
+
     _execution_state[str(workflow_id)] = "running"
-    result = await runtime_executor.execute_workflow(db, workflow)
+    result = await runtime_executor.execute_workflow(db, workflow, initial_input=initial_input)
     _execution_state[str(workflow_id)] = result.get("status", "unknown")
     return result
 
