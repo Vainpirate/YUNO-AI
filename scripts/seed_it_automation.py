@@ -36,7 +36,7 @@ AGENTS = [
     {
         "name": "Requirement Analysis Agent",
         "role": "IT Requirement Analyst",
-        "model": "gemini-2.0-flash",
+        "model": "gemini-2.5-flash",
         "tools": ["web_search"],
         "channels": [],
         "system_prompt": """\
@@ -62,7 +62,7 @@ Always output well-structured markdown.""",
     {
         "name": "Scope Estimation Agent",
         "role": "Technical Estimator",
-        "model": "gemini-2.0-flash",
+        "model": "gemini-2.5-flash",
         "tools": ["calculator", "datetime_now"],
         "channels": [],
         "system_prompt": """\
@@ -138,7 +138,7 @@ Output as clean markdown.""",
     {
         "name": "Task Planner Agent",
         "role": "Project Manager / Sprint Planner",
-        "model": "gemini-2.0-flash",
+        "model": "gemini-2.5-flash",
         "tools": ["calculator", "json_format"],
         "channels": [],
         "system_prompt": """\
@@ -178,7 +178,7 @@ Output as structured markdown.""",
     {
         "name": "Client Communication Agent",
         "role": "Account Manager",
-        "model": "gemini-2.0-flash",
+        "model": "gemini-2.5-flash",
         "tools": ["datetime_now"],
         "channels": ["telegram", "slack", "webhook"],
         "system_prompt": """\
