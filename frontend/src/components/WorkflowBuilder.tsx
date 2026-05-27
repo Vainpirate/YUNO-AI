@@ -3,6 +3,7 @@ import ReactFlow, {
   Background, Controls, MiniMap,
   addEdge, useNodesState, useEdgesState,
   EdgeLabelRenderer, BaseEdge, getBezierPath,
+  Handle, Position,
   type Node, type Edge, type Connection, type EdgeProps,
   MarkerType,
 } from "reactflow";
@@ -18,7 +19,14 @@ import type { Agent, Workflow, WorkflowCreate } from "../types";
 
 function AgentNode({ data }: { data: { label: string; role: string | null; tools: string[] } }) {
   return (
-    <div className="bg-white border-2 border-brand-200 rounded-xl shadow-md px-4 py-3 min-w-[150px] max-w-[200px]">
+    <div className="bg-white border-2 border-brand-200 rounded-xl shadow-md px-4 py-3 min-w-[150px] max-w-[200px] relative">
+      {/* Target handle — top (incoming connections) */}
+      <Handle
+        type="target"
+        position={Position.Top}
+        className="!w-3 !h-3 !bg-brand-400 !border-2 !border-white !rounded-full"
+      />
+
       <div className="flex items-center gap-2 mb-1">
         <span className="w-6 h-6 rounded-full bg-brand-100 text-brand-700 text-xs font-bold flex items-center justify-center shrink-0">
           {data.label[0].toUpperCase()}
@@ -36,6 +44,13 @@ function AgentNode({ data }: { data: { label: string; role: string | null; tools
           )}
         </div>
       )}
+
+      {/* Source handle — bottom (outgoing connections) */}
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className="!w-3 !h-3 !bg-emerald-400 !border-2 !border-white !rounded-full"
+      />
     </div>
   );
 }
