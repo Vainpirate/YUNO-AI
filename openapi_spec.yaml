@@ -1,10 +1,17 @@
 openapi: 3.0.3
 info:
   title: YUNO AI — Agent Orchestration Platform API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     REST + WebSocket API for the YUNO AI Agent Orchestration Platform.
     Interactive docs: http://localhost:8000/docs
+
+    ### What's new in v1.2
+    - `skills` and `interaction_rules` fields on agents
+    - `guardrails` enforced at runtime (input + output blocking)
+    - `max_iterations` on workflows for loop / cycle safety
+    - Schedule management endpoints (`POST /{id}/schedule`, `GET /scheduled/list`)
+    - `guardrail_blocked` field on execution results and logs
 
 servers:
   - url: http://localhost:8000
@@ -12,9 +19,9 @@ servers:
 
 tags:
   - name: agents
-    description: Agent CRUD and single-agent execution
+    description: Agent CRUD, configuration, and single-agent execution
   - name: workflows
-    description: Workflow CRUD, templates, and execution
+    description: Workflow CRUD, templates, scheduling, and execution
   - name: messages
     description: Inter-agent and external message history
   - name: execution
@@ -54,11 +61,27 @@ paths:
               name: Researcher
               role: Web Researcher
               system_prompt: You are an expert researcher.
-              model: gemini-2.0-flash
-              tools: [calculator, datetime_now]
+              model: gemini-3-flash-preview
+              tools: [web_search, datetime_now]
               channels: [telegram]
-              memory_config: {}
-              guardrails: {}
+              memory_config:
+                window_size: 20
+                memory_type: sliding_window
+              guardrails:
+                banned_keywords: [violence, hate]
+                blocked_topics: [gambling]
+                max_input_tokens: 2000
+                max_output_tokens: 1000
+                require_safe_response: true
+              skills:
+                - name: summarize
+                  description: Summarizes long text into key points
+                  enabled: true
+              interaction_rules:
+                response_format: text
+                language: English
+                temperature: 0.7
+                max_turns: 10
       responses:
         '200':
           description: Created agent
@@ -144,7 +167,7 @@ paths:
                   type: array
                   items:
                     type: string
-                  example: [calculator, datetime_now]
+                  example: [calculator, web_search]
       responses:
         '200':
           description: Updated agent
@@ -192,6 +215,11 @@ paths:
     post:
       tags: [agents]
       summary: Execute a single agent
+      description: |
+        Guardrails are enforced at runtime:
+        - **Input** is checked against `banned_keywords`, `blocked_topics`, and `max_input_tokens` before processing.
+        - **Output** is checked against the same rules; long responses are soft-truncated by `max_output_tokens`.
+        - Blocked steps return `guardrail_blocked: true` and record `status: guardrail_blocked` in execution logs.
       parameters:
         - $ref: '#/components/parameters/AgentId'
       requestBody:
@@ -243,6 +271,16 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/WorkflowCreate'
+            example:
+              name: Research & Summarise
+              description: Two-agent pipeline
+              agents: []
+              graph:
+                nodes: []
+                edges: []
+              schedule: "0 9 * * 1-5"
+              max_iterations: 10
+              template_name: research_summarize
       responses:
         '200':
           description: Created workflow
@@ -264,6 +302,35 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/WorkflowTemplate'
+
+  /api/workflows/scheduled/list:
+    get:
+      tags: [workflows]
+      summary: List all active cron-scheduled workflows
+      description: Returns every workflow that currently has a registered APScheduler job.
+      responses:
+        '200':
+          description: Scheduled job list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scheduled:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        workflow_id:
+                          type: string
+                          format: uuid
+                        next_run:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        trigger:
+                          type: string
+                          example: "cron[minute='0', hour='9', day='*', month='*', day_of_week='mon-fri']"
 
   /api/workflows/{workflow_id}:
     parameters:
@@ -298,15 +365,44 @@ paths:
                 $ref: '#/components/schemas/Workflow'
         '404':
           $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [workflows]
+      summary: Delete workflow
+      responses:
+        '200':
+          description: Deletion confirmed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: deleted
+                  workflow_id:
+                    type: string
+                    format: uuid
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/workflows/{workflow_id}/execute:
     post:
       tags: [workflows]
       summary: Execute a workflow end-to-end
       description: |
-        Compiles the workflow DAG into a LangGraph StateGraph and invokes it.
-        Each agent node persists a Message + ExecutionLog row and broadcasts
-        a WebSocket event to /ws/logs/{workflow_id}.
+        Compiles the workflow graph into a LangGraph StateGraph and invokes it.
+
+        **Cycle / loop support:** back-edges are permitted. Each node tracks its
+        visit count in `state.iteration_counts`; a node that exceeds
+        `workflow.max_iterations` terminates immediately and routes to END with a
+        `[Loop limit reached]` message.
+
+        Each agent node:
+        - Enforces guardrails on input and output
+        - Applies memory window from `memory_config.window_size`
+        - Uses skills and interaction_rules when calling the LLM
+        - Persists a Message + ExecutionLog row
+        - Broadcasts a WebSocket event to `/ws/logs/{workflow_id}`
       parameters:
         - $ref: '#/components/parameters/WorkflowId'
       requestBody:
@@ -350,6 +446,51 @@ paths:
                   status:
                     type: string
                     enum: [running, completed, error, unknown]
+
+  /api/workflows/{workflow_id}/schedule:
+    post:
+      tags: [workflows]
+      summary: Set or clear the cron schedule for a workflow
+      description: |
+        Accepts a standard 5-field cron expression.  Pass `null` or an empty
+        string to remove the schedule.
+
+        **Cron examples**
+        - `"*/5 * * * *"` — every 5 minutes
+        - `"0 9 * * 1-5"` — 09:00 on weekdays
+        - `"0 0 * * 0"`   — midnight on Sundays
+      parameters:
+        - $ref: '#/components/parameters/WorkflowId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                schedule:
+                  type: string
+                  nullable: true
+                  example: "0 9 * * 1-5"
+      responses:
+        '200':
+          description: Schedule updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflow_id:
+                    type: string
+                    format: uuid
+                  schedule:
+                    type: string
+                    nullable: true
+                  message:
+                    type: string
+                    example: "Schedule set to: 0 9 * * 1-5"
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   # ── Messages ─────────────────────────────────────────────────────────────────
 
@@ -395,10 +536,11 @@ paths:
       summary: Subscribe to workflow execution log stream (WebSocket)
       description: |
         Upgrade to WebSocket. Events emitted:
-        - on connect:       {"workflow_id":"…","status":"connected"}
-        - workflow_started: {"event":"workflow_started","agent_count":N}
-        - step_completed:   {"event":"step_completed","agent":"…","response":"…","tool_outputs":[…]}
-        - workflow_completed: {"event":"workflow_completed","final_output":"…","steps":N}
+        - on connect:         `{"workflow_id":"…","status":"connected"}`
+        - workflow_started:   `{"event":"workflow_started","agent_count":N,"workflow_name":"…"}`
+        - agent_response:     `{"event":"agent_response","agent":"…","response":"…","tool_outputs":[…]}`
+        - step_completed:     `{"event":"step_completed","agent":"…","response":"…","tool_outputs":[…]}`
+        - workflow_completed: `{"event":"workflow_completed","final_output":"…","steps":N}`
       parameters:
         - name: workflow_id
           in: path
@@ -415,9 +557,9 @@ paths:
       summary: Subscribe to agent state updates (WebSocket)
       description: |
         Events emitted:
-        - on connect: {"agent_id":"…","status":"connected"}
-        - running:    {"status":"running","agent":"…"}
-        - idle:       {"status":"idle","agent":"…","response_preview":"…"}
+        - on connect: `{"agent_id":"…","status":"connected"}`
+        - running:    `{"status":"running","agent":"…"}`
+        - idle:       `{"status":"idle","agent":"…","response_preview":"…"}`
       parameters:
         - name: agent_id
           in: path
@@ -529,6 +671,92 @@ components:
         detail:
           type: string
 
+    # ── Agent schemas ──────────────────────────────────────────────────────────
+
+    AgentSkill:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: summarize
+        description:
+          type: string
+          example: Summarizes long text into concise key points
+        enabled:
+          type: boolean
+          default: true
+
+    AgentGuardrails:
+      type: object
+      description: |
+        Rules enforced at runtime on every agent step.
+        Input violations hard-block the step; output violations truncate or block.
+      properties:
+        banned_keywords:
+          type: array
+          items:
+            type: string
+          description: Words/phrases that trigger a hard block if found in input or output
+          example: [violence, hate]
+        blocked_topics:
+          type: array
+          items:
+            type: string
+          description: Topic strings treated identically to banned_keywords
+          example: [gambling, weapons]
+        max_input_tokens:
+          type: integer
+          description: Approximate token cap on user input (word-count × 1.3 proxy)
+          example: 2000
+        max_output_tokens:
+          type: integer
+          description: Approximate token cap on agent response; exceeded output is truncated
+          example: 1000
+        require_safe_response:
+          type: boolean
+          description: If true, any guardrail violation hard-blocks instead of soft-truncating
+          default: false
+
+    AgentMemoryConfig:
+      type: object
+      description: Controls how much conversation history the agent retains between turns.
+      properties:
+        window_size:
+          type: integer
+          description: Number of individual messages to keep in the sliding window
+          default: 20
+          example: 10
+        memory_type:
+          type: string
+          enum: [sliding_window, full]
+          default: sliding_window
+
+    AgentInteractionRules:
+      type: object
+      description: Controls how the agent formats responses and behaves during conversations.
+      properties:
+        response_format:
+          type: string
+          enum: [text, json, markdown]
+          default: text
+          description: Instructs the LLM to respond in this format
+        language:
+          type: string
+          description: Instruct the agent to respond in a specific language
+          example: Spanish
+        temperature:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          default: 0.7
+          description: LLM sampling temperature (0 = deterministic, 1 = creative)
+        max_turns:
+          type: integer
+          description: Maximum conversation turns stored in memory
+          default: 10
+
     Agent:
       type: object
       properties:
@@ -539,23 +767,34 @@ components:
           type: string
         role:
           type: string
+          nullable: true
         system_prompt:
           type: string
+          nullable: true
         model:
           type: string
-          example: gemini-2.0-flash
+          example: gemini-3-flash-preview
         tools:
           type: array
           items:
             type: string
+          example: [web_search, calculator]
         channels:
           type: array
           items:
             type: string
+          example: [telegram]
         memory_config:
-          type: object
+          $ref: '#/components/schemas/AgentMemoryConfig'
         guardrails:
-          type: object
+          $ref: '#/components/schemas/AgentGuardrails'
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentSkill'
+          description: Declarative capabilities appended to the system prompt
+        interaction_rules:
+          $ref: '#/components/schemas/AgentInteractionRules'
         created_at:
           type: string
           format: date-time
@@ -575,7 +814,7 @@ components:
           type: string
         model:
           type: string
-          default: gemini-2.0-flash
+          default: gemini-3-flash-preview
         tools:
           type: array
           items:
@@ -585,16 +824,20 @@ components:
           items:
             type: string
         memory_config:
-          type: object
+          $ref: '#/components/schemas/AgentMemoryConfig'
         guardrails:
-          type: object
+          $ref: '#/components/schemas/AgentGuardrails'
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentSkill'
+        interaction_rules:
+          $ref: '#/components/schemas/AgentInteractionRules'
 
     AgentUpdate:
       type: object
       description: All fields optional — only provided fields are updated
       properties:
-        name:
-          type: string
         role:
           type: string
         system_prompt:
@@ -610,9 +853,15 @@ components:
           items:
             type: string
         memory_config:
-          type: object
+          $ref: '#/components/schemas/AgentMemoryConfig'
         guardrails:
-          type: object
+          $ref: '#/components/schemas/AgentGuardrails'
+        skills:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentSkill'
+        interaction_rules:
+          $ref: '#/components/schemas/AgentInteractionRules'
 
     AgentExecutionResult:
       type: object
@@ -631,6 +880,11 @@ components:
                 type: string
               result:
                 type: string
+        guardrail_blocked:
+          type: boolean
+          description: True when the step was blocked by a guardrail rule
+
+    # ── Workflow schemas ───────────────────────────────────────────────────────
 
     Workflow:
       type: object
@@ -642,6 +896,7 @@ components:
           type: string
         description:
           type: string
+          nullable: true
         agents:
           type: array
           items:
@@ -649,6 +904,12 @@ components:
             format: uuid
         graph:
           type: object
+          description: |
+            Graph descriptor.  Edges are stored as 2- or 3-element arrays:
+            - `[src, dst]` — unconditional edge
+            - `[src, dst, condition]` — conditional; fires when the previous
+              agent's output contains the `condition` keyword (case-insensitive).
+            Back-edges are permitted, enabling feedback loops.
           properties:
             nodes:
               type: array
@@ -663,6 +924,16 @@ components:
         schedule:
           type: string
           nullable: true
+          description: Standard 5-field cron expression (e.g. "0 9 * * 1-5")
+        max_iterations:
+          type: integer
+          default: 10
+          minimum: 1
+          maximum: 100
+          description: |
+            Maximum number of times any single node may fire in one run.
+            Provides loop-safety for cyclic graphs — the node is terminated
+            when this cap is exceeded.
         template_name:
           type: string
           nullable: true
@@ -688,6 +959,12 @@ components:
         schedule:
           type: string
           nullable: true
+          description: 5-field cron expression
+        max_iterations:
+          type: integer
+          default: 10
+          minimum: 1
+          maximum: 100
         template_name:
           type: string
           nullable: true
@@ -696,8 +973,6 @@ components:
       type: object
       description: All fields optional
       properties:
-        name:
-          type: string
         description:
           type: string
         agents:
@@ -708,6 +983,11 @@ components:
           type: object
         schedule:
           type: string
+          nullable: true
+        max_iterations:
+          type: integer
+          minimum: 1
+          maximum: 100
 
     WorkflowTemplate:
       type: object
@@ -733,6 +1013,8 @@ components:
           type: string
         steps:
           type: integer
+
+    # ── Message / Log schemas ──────────────────────────────────────────────────
 
     Message:
       type: object
@@ -781,7 +1063,11 @@ components:
           type: string
         status:
           type: string
-          enum: [success, error, running]
+          enum: [running, success, error, guardrail_blocked]
+          description: |
+            `guardrail_blocked` — the step was halted by a guardrail rule;
+            input or output contained a banned keyword, blocked topic, or
+            exceeded a token cap.
         input:
           type: object
         output:
@@ -790,6 +1076,7 @@ components:
           type: integer
         cost:
           type: number
+          description: Estimated cost in USD (tokens × $0.15/M)
         error:
           type: string
           nullable: true

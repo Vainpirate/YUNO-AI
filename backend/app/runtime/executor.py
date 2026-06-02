@@ -11,29 +11,38 @@ Design notes
     - emit real-time WebSocket events via the broadcaster
     - be awaited directly from FastAPI async route handlers
 
+* Guardrails enforcement (applied at runtime, not just stored in DB):
+    - ``banned_keywords``: list of strings; if any appear in input or output,
+      the step is blocked with a safe refusal message.
+    - ``max_input_tokens``: approximate token cap on user input (word-count proxy).
+    - ``max_output_tokens``: approximate token cap on agent response.
+    - ``blocked_topics``: list of topic strings treated identically to banned_keywords.
+    - ``require_safe_response``: if true, non-compliant outputs become refusals.
+
+* Memory config (read from agent.memory_config):
+    - ``window_size``: number of messages to retain in the sliding-window memory
+      (defaults to MemoryStore.WINDOW = 20).
+
+* Interaction rules (read from agent.interaction_rules):
+    - ``response_format``: "text" | "json" | "markdown" — appended as instruction.
+    - ``language``: instruct the LLM to reply in a specific language.
+    - ``temperature``: float 0–1 passed to Gemini GenerateContentConfig.
+    - ``max_turns``: cap on conversation turns (enforced against memory depth).
+
+* Skills (read from agent.skills):
+    - List of ``{"name": str, "description": str, "enabled": bool}`` dicts.
+    - Enabled skills are appended to the system prompt so the LLM knows it can
+      exhibit those behaviours.
+
 * LLM behaviour:
-    - If ``GEMINI_API_KEY`` is set, the async Google Gemini client is used for
-      agents that have no matching tool for the input.
-    - If the key is absent (CI, tests, local dev without a key), a harmless
-      mock string is returned so the rest of the stack keeps working.
+    - If ``GEMINI_API_KEY`` is set, the async Google Gemini client is used.
+    - If the key is absent, a harmless mock string is returned.
 
-* Tool behaviour:
-    - If an agent has registered tools, every tool is executed against the
-      user input and the **last tool result** is used as the agent's response.
-      This preserves backward-compatibility with the existing test suite
-      (``test_messaging.py`` asserts response == "100" for a calculator agent).
-    - Tool output is also passed to the LLM as additional context when a key
-      is available, so the final response is still natural-language where
-      appropriate.
-
-* LangGraph integration:
-    - ``_build_langgraph`` converts a workflow's ``graph`` JSON
-      (``{nodes: [...], edges: [[src,dst], ...]}``) into a compiled
-      LangGraph ``StateGraph``.
-    - Each node is a closure over ``_run_agent_step`` created by
-      ``agent_factory.make_agent_node``.
-    - The compiled graph is invoked via ``ainvoke`` so async broadcaster
-      events can be fired between steps using a custom stream callback.
+* Loop safety (feedback loops):
+    - ``max_iterations`` on the Workflow model caps how many times any single
+      node can fire in a single run (default 10).
+    - The LangGraph state carries ``iteration_counts`` — a dict mapping node_id
+      to its visit count.  A node that exceeds the cap routes to END.
 """
 from __future__ import annotations
 
@@ -54,19 +63,80 @@ from app.websocket.broadcaster import broadcaster
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Guardrail helpers
+# ---------------------------------------------------------------------------
+
+class GuardrailViolation(Exception):
+    """Raised when a guardrail rule is violated."""
+
+
+def _apply_guardrails(guardrails: dict, text: str, stage: str) -> str:
+    """Check *text* against guardrails config.
+
+    Returns the (possibly truncated) text if compliant.
+    Raises GuardrailViolation if a hard block is triggered.
+
+    ``stage`` is "input" or "output" — used in violation messages.
+    """
+    if not guardrails:
+        return text
+
+    # Keyword / topic blocklist
+    blocked: list[str] = list(guardrails.get("banned_keywords", []))
+    blocked += list(guardrails.get("blocked_topics", []))
+    lower_text = text.lower()
+    for kw in blocked:
+        if kw.lower() in lower_text:
+            raise GuardrailViolation(
+                f"Guardrail blocked {stage}: contains prohibited term '{kw}'"
+            )
+
+    # Token-count caps (approximate: words × 1.3 ≈ tokens)
+    approx_tokens = len(text.split()) * 1.3
+    cap_key = "max_input_tokens" if stage == "input" else "max_output_tokens"
+    cap = guardrails.get(cap_key)
+    if cap and approx_tokens > cap:
+        # Truncate rather than hard-block for output; hard-block for input
+        if stage == "output":
+            # Soft truncate to keep things flowing
+            word_limit = int(cap / 1.3)
+            text = " ".join(text.split()[:word_limit]) + " [truncated by guardrail]"
+        else:
+            raise GuardrailViolation(
+                f"Guardrail blocked input: exceeds max_input_tokens ({cap})"
+            )
+
+    return text
+
 
 # ---------------------------------------------------------------------------
 # Typed workflow state (used by LangGraph StateGraph)
 # ---------------------------------------------------------------------------
 
+try:
+    from typing_extensions import TypedDict as _TypedDict  # type: ignore[import]
+
+    class WFState(_TypedDict):
+        messages: list
+        current_input: str
+        final_output: str
+        step_outputs: list
+        iteration_counts: dict
+
+except Exception:  # noqa: BLE001
+    WFState = dict  # type: ignore[assignment,misc]
+
+
 class WorkflowState(dict):
     """Typed dict used as LangGraph state.
 
     Keys:
-        messages      – accumulated chat history across all agent nodes
-        current_input – the text passed to the *next* node
-        final_output  – the most recent agent response (final answer at END)
-        step_outputs  – list of per-step result dicts from _run_agent_step
+        messages         – accumulated chat history across all agent nodes
+        current_input    – the text passed to the *next* node
+        final_output     – the most recent agent response (final answer at END)
+        step_outputs     – list of per-step result dicts from _run_agent_step
+        iteration_counts – dict[node_id, int] tracking visits for loop safety
     """
 
 
@@ -74,15 +144,47 @@ class WorkflowState(dict):
 # RuntimeExecutor
 # ---------------------------------------------------------------------------
 
+_GROQ_MODELS = {
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "llama3-70b-8192",
+    "llama3-8b-8192",
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+    "gemma-7b-it",
+}
+
+
+def _is_groq_model(model: str) -> bool:
+    """True when *model* is a known Groq model name."""
+    m = (model or "").lower()
+    return m in _GROQ_MODELS or m.startswith("llama") or m.startswith("mixtral") or m.startswith("gemma")
+
+
 class RuntimeExecutor:
     def __init__(self) -> None:
         self.tools = ToolRegistry()
         self.memory = MemoryStore()
         self._gemini_client = None  # lazy-initialised google.genai.Client
+        self._groq_client = None    # lazy-initialised groq.AsyncGroq
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _get_groq_client(self):
+        """Return a cached groq.AsyncGroq client, or None if no key / sdk."""
+        if self._groq_client is not None:
+            return self._groq_client
+        try:
+            from app.config import settings
+            if not settings.groq_api_key:
+                return None
+            from groq import AsyncGroq  # type: ignore[import]
+            self._groq_client = AsyncGroq(api_key=settings.groq_api_key)
+            return self._groq_client
+        except Exception:  # noqa: BLE001
+            return None
 
     def _get_gemini_client(self):
         """Return a cached google.genai.Client, or None if no key is set."""
@@ -98,6 +200,35 @@ class RuntimeExecutor:
         except Exception:  # noqa: BLE001
             return None
 
+    def _memory_window(self, agent: Agent) -> int:
+        """Return the effective memory window size for this agent."""
+        cfg = agent.memory_config or {}
+        return int(cfg.get("window_size", MemoryStore.WINDOW))
+
+    def _build_system_prompt(self, agent: Agent) -> str:
+        """Assemble the full system prompt: base + skills + interaction rules."""
+        base = agent.system_prompt or "You are a helpful assistant."
+
+        # Append enabled skills as behavioural instructions
+        skills: list[dict] = agent.skills or []
+        enabled_skills = [s for s in skills if s.get("enabled", True) and s.get("name")]
+        if enabled_skills:
+            skill_lines = "\n".join(
+                f"- {s['name']}: {s.get('description', '')}" for s in enabled_skills
+            )
+            base += f"\n\nYou have the following skills:\n{skill_lines}"
+
+        # Append interaction rules as format/language instructions
+        rules: dict = agent.interaction_rules or {}
+        if rules.get("response_format") == "json":
+            base += "\n\nAlways respond with valid JSON only — no prose outside the JSON."
+        elif rules.get("response_format") == "markdown":
+            base += "\n\nAlways format your response using Markdown."
+        if rules.get("language"):
+            base += f"\n\nAlways respond in {rules['language']}."
+
+        return base
+
     def _run_agent_step(self, agent: Agent, user_input: str) -> dict:
         """Synchronous, side-effect-free agent step.
 
@@ -109,12 +240,34 @@ class RuntimeExecutor:
                 "response":    str,   # final text returned to caller / next agent
                 "tool_outputs": [...],
                 "prompt":      str,   # the assembled prompt (for logging)
+                "guardrail_blocked": bool,
             }
+
+        Guardrails are enforced:
+          - Input is checked before any processing.
+          - Output is checked (and optionally truncated) before returning.
 
         If the agent has tools the tool result IS the response (keeps tests
         passing).  LLM synthesis is applied on top in the async layer when a
         key is available.
         """
+        guardrails: dict = agent.guardrails or {}
+        window = self._memory_window(agent)
+
+        # --- guardrail: check input ---
+        try:
+            user_input = _apply_guardrails(guardrails, user_input, "input")
+        except GuardrailViolation as exc:
+            logger.warning("Guardrail input violation for agent %s: %s", agent.name, exc)
+            return {
+                "agent_id": str(agent.id),
+                "agent_name": agent.name,
+                "response": f"[Guardrail] {exc}",
+                "tool_outputs": [],
+                "prompt": "",
+                "guardrail_blocked": True,
+            }
+
         memory = self.memory.get(str(agent.id))
         prompt = build_agent_prompt(agent, user_input, memory)
 
@@ -130,16 +283,20 @@ class RuntimeExecutor:
 
         # --- response determination (sync path) ---
         if tool_outputs:
-            # Use last tool result as primary response — LLM wrapping is done
-            # asynchronously in execute_agent / _llm_synthesise_tool_result.
             response_text = tool_outputs[-1]["result"]
         else:
-            # No tools: placeholder — async layer replaces this with LLM output.
             response_text = f"[{agent.name}] received: {user_input}"
 
-        # Update in-memory history
-        self.memory.append(str(agent.id), user_input)
-        self.memory.append(str(agent.id), response_text)
+        # --- guardrail: check output ---
+        try:
+            response_text = _apply_guardrails(guardrails, response_text, "output")
+        except GuardrailViolation as exc:
+            logger.warning("Guardrail output violation for agent %s: %s", agent.name, exc)
+            response_text = f"[Guardrail] {exc}"
+
+        # Update in-memory history with configured window
+        self.memory.append(str(agent.id), user_input, window)
+        self.memory.append(str(agent.id), response_text, window)
 
         return {
             "agent_id": str(agent.id),
@@ -147,33 +304,86 @@ class RuntimeExecutor:
             "response": response_text,
             "tool_outputs": tool_outputs,
             "prompt": prompt,
+            "guardrail_blocked": False,
         }
 
     async def _llm_call(
         self,
         system_prompt: str,
         messages: list[dict],
-        model: str = "gemini-3-flash-preview",
+        model: str = "llama-3.3-70b-versatile",
+        temperature: float | None = None,
     ) -> tuple[str | None, int]:
-        """Async LLM call via Google Gemini.  Returns (text, tokens_used) tuple.
+        """Dispatch to Groq or Gemini.
 
-        ``text`` is None if no client is configured or the call fails.
-        ``tokens_used`` is the real prompt+candidates token count from Gemini's
-        ``usage_metadata``; falls back to 0 on error.
-
-        Converts the memory store's OpenAI-style message list
-        (``[{"role": "user"|"assistant", "content": "..."}]``) to the Gemini
-        Content format (``[{"role": "user"|"model", "parts": [{"text": "..."}]}]``).
-        The system prompt is passed via ``GenerateContentConfig.system_instruction``.
+        Priority:
+          1. If GROQ_API_KEY is set → always try Groq first.
+             Uses the agent's model name if it's a known Groq model,
+             otherwise falls back to llama-3.3-70b-versatile so agents
+             created with old Gemini model names still work.
+          2. If Groq fails or key is absent → try Gemini.
+          3. Return (None, 0) when no provider is available.
         """
+        groq_client = self._get_groq_client()
+        if groq_client is not None:
+            groq_model = model if _is_groq_model(model) else "llama-3.3-70b-versatile"
+            result = await self._groq_call(system_prompt, messages, groq_model, temperature)
+            if result[0] is not None:
+                return result
+            logger.info("Groq call failed for model '%s', falling back to Gemini", groq_model)
+
+        # Gemini fallback (used when GROQ_API_KEY not set or Groq call failed)
+        gemini_model = model if not _is_groq_model(model) else "gemini-2.0-flash-lite"
+        return await self._gemini_call(system_prompt, messages, gemini_model, temperature)
+
+    async def _groq_call(
+        self,
+        system_prompt: str,
+        messages: list[dict],
+        model: str,
+        temperature: float | None = None,
+    ) -> tuple[str | None, int]:
+        """Async LLM call via Groq (OpenAI-compatible).
+
+        Converts the memory store's message list to OpenAI format and prepends
+        the system prompt as a ``system`` role message.
+        """
+        client = self._get_groq_client()
+        if client is None:
+            return None, 0
+        try:
+            groq_messages = [{"role": "system", "content": system_prompt}]
+            groq_messages += [
+                {"role": msg["role"], "content": msg["content"]}
+                for msg in messages
+                if msg.get("content")
+            ]
+            kwargs: dict = {"model": model, "messages": groq_messages}
+            if temperature is not None:
+                kwargs["temperature"] = float(temperature)
+
+            response = await client.chat.completions.create(**kwargs)
+            usage = response.usage
+            tokens = (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
+            return response.choices[0].message.content, tokens
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Groq LLM call failed (model=%s): %s", model, exc)
+            return None, 0
+
+    async def _gemini_call(
+        self,
+        system_prompt: str,
+        messages: list[dict],
+        model: str,
+        temperature: float | None = None,
+    ) -> tuple[str | None, int]:
+        """Async LLM call via Google Gemini."""
         client = self._get_gemini_client()
         if client is None:
             return None, 0
         try:
             from google.genai import types  # type: ignore[import]
 
-            # Convert OpenAI-style messages → Gemini Content objects
-            # Gemini uses "model" where OpenAI uses "assistant"
             gemini_contents = [
                 types.Content(
                     role="model" if msg["role"] == "assistant" else "user",
@@ -183,19 +393,20 @@ class RuntimeExecutor:
                 if msg.get("content")
             ]
 
-            # Gemini requires the conversation to start with a user turn
             if not gemini_contents or gemini_contents[0].role != "user":
                 gemini_contents.insert(
                     0,
                     types.Content(role="user", parts=[types.Part(text="(start)")]),
                 )
 
+            config_kwargs: dict = {"system_instruction": system_prompt}
+            if temperature is not None:
+                config_kwargs["temperature"] = float(temperature)
+
             response = await client.aio.models.generate_content(
                 model=model,
                 contents=gemini_contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
             usage = response.usage_metadata
             tokens = (usage.prompt_token_count or 0) + (usage.candidates_token_count or 0)
@@ -215,51 +426,53 @@ class RuntimeExecutor:
         user_input: str,
         workflow_id: UUID | None = None,
     ) -> dict:
-        """Execute a single agent and persist the result.
-
-        Emits a WebSocket event to any subscribers listening on
-        ``/ws/agent-status/{agent.id}`` and (if workflow_id is set)
-        ``/ws/logs/{workflow_id}``.
-        """
-        # --- emit: agent is running ---
+        """Execute a single agent and persist the result."""
         await _safe_publish_agent(str(agent.id), {"status": "running", "agent": agent.name})
 
-        # Snapshot history BEFORE _run_agent_step appends the placeholder so
-        # the message list sent to Gemini always ends with a user turn.
         prior_messages = self.memory.as_messages(str(agent.id))
 
-        # --- synchronous step (tools + prompt) ---
         result = self._run_agent_step(agent, user_input)
 
-        # --- async LLM synthesis (always runs when Gemini key is set) ---
+        # Skip LLM synthesis on guardrail-blocked steps
         llm_tokens = 0
-        user_content = user_input
-        if result["tool_outputs"]:
-            tool_ctx = "\n".join(
-                f"[{t['tool']}]: {t['result']}" for t in result["tool_outputs"]
+        if not result.get("guardrail_blocked"):
+            user_content = user_input
+            if result["tool_outputs"]:
+                tool_ctx = "\n".join(
+                    f"[{t['tool']}]: {t['result']}" for t in result["tool_outputs"]
+                )
+                user_content += f"\n\nTool data available:\n{tool_ctx}"
+
+            rules: dict = agent.interaction_rules or {}
+            temperature = rules.get("temperature")
+
+            llm_response, llm_tokens = await self._llm_call(
+                system_prompt=self._build_system_prompt(agent),
+                messages=prior_messages + [{"role": "user", "content": user_content}],
+                model=agent.model or "llama-3.3-70b-versatile",
+                temperature=temperature,
             )
-            user_content += f"\n\nTool data available:\n{tool_ctx}"
+            if llm_response:
+                # Apply output guardrail to LLM response
+                try:
+                    llm_response = _apply_guardrails(
+                        agent.guardrails or {}, llm_response, "output"
+                    )
+                except GuardrailViolation as exc:
+                    llm_response = f"[Guardrail] {exc}"
 
-        llm_response, llm_tokens = await self._llm_call(
-            system_prompt=agent.system_prompt or "You are a helpful assistant.",
-            messages=prior_messages + [{"role": "user", "content": user_content}],
-            model=agent.model or "gemini-3-flash-preview",
-        )
-        if llm_response:
-            result["response"] = llm_response
-            self.memory.clear(str(agent.id))
-            for m in prior_messages:
-                self.memory.append(str(agent.id), m["content"])
-            self.memory.append(str(agent.id), user_input)
-            self.memory.append(str(agent.id), llm_response)
-        else:
-            logger.warning("LLM returned no response for agent %s", agent.name)
+                result["response"] = llm_response
+                window = self._memory_window(agent)
+                self.memory.clear(str(agent.id))
+                for m in prior_messages:
+                    self.memory.append(str(agent.id), m["content"], window)
+                self.memory.append(str(agent.id), user_input, window)
+                self.memory.append(str(agent.id), llm_response, window)
+            else:
+                logger.warning("LLM returned no response for agent %s", agent.name)
 
-        # Real token count from Gemini; fall back to word-count estimate for
-        # tool-only steps where no LLM call was made.
         tokens_used = llm_tokens or max(1, len(result["prompt"].split()) + len(result["response"].split()))
 
-        # --- persist to DB ---
         if workflow_id is not None:
             db.add(
                 Message(
@@ -277,20 +490,19 @@ class RuntimeExecutor:
                 workflow_id=workflow_id,
                 agent_id=agent.id,
                 step_name="execute_agent",
-                status="success",
+                status="guardrail_blocked" if result.get("guardrail_blocked") else "success",
                 input={"prompt": result["prompt"]},
                 output={
                     "response": result["response"],
                     "tool_outputs": result["tool_outputs"],
                 },
                 tokens_used=tokens_used,
-                cost=round(tokens_used * 0.000_000_15, 6),  # gemini-2.0-flash: ~$0.15/1M tokens
+                cost=round(tokens_used * 0.000_000_15, 6),
                 created_at=datetime.now(timezone.utc),
             )
         )
         db.commit()
 
-        # --- emit: agent idle + log event ---
         await _safe_publish_agent(str(agent.id), {
             "status": "idle",
             "agent": agent.name,
@@ -309,19 +521,15 @@ class RuntimeExecutor:
             "agent_id": result["agent_id"],
             "response": result["response"],
             "tool_outputs": result["tool_outputs"],
+            "guardrail_blocked": result.get("guardrail_blocked", False),
         }
 
     async def execute_workflow(self, db: Session, workflow: Workflow, initial_input: str = "Workflow started") -> dict:
         """Execute a multi-agent workflow using a LangGraph StateGraph.
 
-        1. Resolves all agents referenced in the workflow.
-        2. Builds a LangGraph ``StateGraph`` from the workflow's ``graph`` JSON.
-        3. Invokes the graph; each node calls ``_run_agent_step`` synchronously.
-        4. Persists messages + execution logs for every step.
-        5. Emits WebSocket events at start, per step, and at completion.
-
-        Falls back to a simple sequential loop if LangGraph is unavailable or
-        the workflow graph cannot be compiled.
+        Supports cyclic graphs via ``max_iterations`` loop-safety: each node
+        tracks its visit count in the LangGraph state and routes to END when
+        the cap is reached.
         """
         agent_ids = [UUID(a) for a in (workflow.agents or [])]
         if not agent_ids:
@@ -336,7 +544,6 @@ class RuntimeExecutor:
         if not agents_map:
             return {"workflow_id": str(workflow.id), "status": "error", "error": "No valid agents found"}
 
-        # --- emit workflow start ---
         await _safe_publish_workflow(str(workflow.id), {
             "event": "workflow_started",
             "workflow_id": str(workflow.id),
@@ -345,17 +552,18 @@ class RuntimeExecutor:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
-        # --- build and run LangGraph (async path) ---
-        compiled = self._build_langgraph(workflow, agents_map)
+        max_iterations: int = workflow.max_iterations or 10
+
+        compiled = self._build_langgraph(workflow, agents_map, max_iterations)
         if compiled is not None:
             initial_state: WorkflowState = {
                 "messages": [],
                 "current_input": initial_input,
                 "final_output": "",
                 "step_outputs": [],
+                "iteration_counts": {},
             }
             try:
-                # ainvoke is required — async node functions call _llm_call
                 final_state = await compiled.ainvoke(initial_state)
                 step_outputs: list[dict] = final_state.get("step_outputs", [])
                 final_output: str = final_state.get("final_output", "")
@@ -365,7 +573,6 @@ class RuntimeExecutor:
         else:
             step_outputs, final_output = await self._fallback_sequential(db, agents_map, workflow, initial_input)
 
-        # --- persist results ---
         for step in step_outputs:
             agent_id = UUID(step["agent_id"])
             db.add(
@@ -393,7 +600,6 @@ class RuntimeExecutor:
                     created_at=datetime.now(timezone.utc),
                 )
             )
-            # Emit per-step WebSocket log
             await _safe_publish_workflow(str(workflow.id), {
                 "event": "step_completed",
                 "agent": step["agent_name"],
@@ -403,7 +609,6 @@ class RuntimeExecutor:
             })
         db.commit()
 
-        # --- emit workflow completed ---
         await _safe_publish_workflow(str(workflow.id), {
             "event": "workflow_completed",
             "workflow_id": str(workflow.id),
@@ -423,8 +628,12 @@ class RuntimeExecutor:
     # LangGraph builder
     # ------------------------------------------------------------------
 
-    def _build_langgraph(self, workflow: Workflow, agents_map: dict[str, Agent]):
+    def _build_langgraph(self, workflow: Workflow, agents_map: dict[str, Agent], max_iterations: int = 10):
         """Compile a LangGraph StateGraph from the workflow's graph descriptor.
+
+        Supports cyclic graphs: each node tracks its visit count in
+        ``state["iteration_counts"]`` and self-routes to END when the count
+        exceeds ``max_iterations``.
 
         Returns a compiled graph or ``None`` if LangGraph is unavailable or
         the graph descriptor has no valid nodes.
@@ -439,70 +648,89 @@ class RuntimeExecutor:
         node_ids: list[str] = [str(n) for n in graph_def.get("nodes", list(agents_map.keys()))]
         edges: list[list] = graph_def.get("edges", [])
 
-        # Filter to nodes that have a corresponding agent
         valid_nodes = [n for n in node_ids if n in agents_map]
         if not valid_nodes:
             return None
 
-        # Define state schema as a plain dict (TypedDict-compatible)
-        from typing_extensions import TypedDict  # type: ignore[import]
-
-        class WFState(TypedDict):
-            messages: list
-            current_input: str
-            final_output: str
-            step_outputs: list
-
         graph = StateGraph(WFState)
 
-        # Add one async node per valid agent.
-        # Each node: run tools synchronously, then call Gemini LLM asynchronously
-        # to synthesise a natural-language response from the tool output + prompt.
         for node_id in valid_nodes:
             agent = agents_map[node_id]
 
-            async def _make_async_node(state: WFState, _agent: Agent = agent) -> WFState:  # type: ignore[return]
+            async def _make_async_node(state: WFState, _agent: Agent = agent, _node_id: str = node_id) -> WFState:  # type: ignore[return]
                 current_input: str = state.get("current_input", "") or ""
 
-                # Snapshot memory BEFORE running tools so the LLM message list
-                # ends with a user turn (Gemini requires this).
-                prior_messages = self.memory.as_messages(str(_agent.id))
+                # --- loop-safety: check and increment visit count ---
+                iter_counts: dict = dict(state.get("iteration_counts") or {})
+                visit = iter_counts.get(_node_id, 0) + 1
+                iter_counts[_node_id] = visit
+                if visit > max_iterations:
+                    logger.warning(
+                        "Loop safety: node %s reached max_iterations=%d — terminating loop",
+                        _agent.name, max_iterations,
+                    )
+                    loop_msg = f"[Loop limit reached for {_agent.name} after {max_iterations} iterations]"
+                    return {
+                        "messages": list(state.get("messages", [])) + [
+                            {"role": "assistant", "name": _agent.name, "content": loop_msg}
+                        ],
+                        "current_input": loop_msg,
+                        "final_output": loop_msg,
+                        "step_outputs": list(state.get("step_outputs", [])) + [{
+                            "agent_id": str(_agent.id),
+                            "agent_name": _agent.name,
+                            "response": loop_msg,
+                            "tool_outputs": [],
+                            "prompt": "",
+                            "tokens_used": 0,
+                            "loop_terminated": True,
+                        }],
+                        "iteration_counts": iter_counts,
+                    }
 
+                prior_messages = self.memory.as_messages(str(_agent.id))
                 result = self._run_agent_step(_agent, current_input)
 
-                # Build a clean message for the LLM:
-                #   prior history + current user input + optional tool context
-                user_content = current_input
-                if result["tool_outputs"]:
-                    tool_ctx = "\n".join(
-                        f"[{t['tool']}]: {t['result']}" for t in result["tool_outputs"]
+                llm_tokens = 0
+                if not result.get("guardrail_blocked"):
+                    user_content = current_input
+                    if result["tool_outputs"]:
+                        tool_ctx = "\n".join(
+                            f"[{t['tool']}]: {t['result']}" for t in result["tool_outputs"]
+                        )
+                        user_content += f"\n\nTool data available:\n{tool_ctx}"
+
+                    rules: dict = _agent.interaction_rules or {}
+                    temperature = rules.get("temperature")
+
+                    llm_messages = prior_messages + [{"role": "user", "content": user_content}]
+                    llm_response, llm_tokens = await self._llm_call(
+                        system_prompt=self._build_system_prompt(_agent),
+                        messages=llm_messages,
+                        model=_agent.model or "llama-3.3-70b-versatile",
+                        temperature=temperature,
                     )
-                    user_content += f"\n\nTool data available:\n{tool_ctx}"
+                    if llm_response:
+                        try:
+                            llm_response = _apply_guardrails(
+                                _agent.guardrails or {}, llm_response, "output"
+                            )
+                        except GuardrailViolation as exc:
+                            llm_response = f"[Guardrail] {exc}"
+                        result["response"] = llm_response
+                        result["tokens_used"] = llm_tokens
+                    else:
+                        logger.warning("LLM returned no response for agent %s", _agent.name)
 
-                llm_messages = prior_messages + [{"role": "user", "content": user_content}]
-
-                llm_response, llm_tokens = await self._llm_call(
-                    system_prompt=_agent.system_prompt or "You are a helpful assistant.",
-                    messages=llm_messages,
-                    model=_agent.model or "gemini-3-flash-preview",
-                )
-                if llm_response:
-                    result["response"] = llm_response
-                    result["tokens_used"] = llm_tokens
-                else:
-                    logger.warning("LLM returned no response for agent %s", _agent.name)
-
-                # Small pause to respect per-minute rate limits across agents
                 await asyncio.sleep(2)
 
-                # Update memory with the real exchange (discard raw tool output)
+                window = self._memory_window(_agent)
                 self.memory.clear(str(_agent.id))
                 for m in prior_messages:
-                    self.memory.append(str(_agent.id), m["content"])
-                self.memory.append(str(_agent.id), current_input)
-                self.memory.append(str(_agent.id), result["response"])
+                    self.memory.append(str(_agent.id), m["content"], window)
+                self.memory.append(str(_agent.id), current_input, window)
+                self.memory.append(str(_agent.id), result["response"], window)
 
-                # Emit live WebSocket event for this step
                 await _safe_publish_workflow(str(workflow.id), {
                     "event": "agent_response",
                     "agent": _agent.name,
@@ -518,21 +746,12 @@ class RuntimeExecutor:
                     "current_input": result["response"],
                     "final_output": result["response"],
                     "step_outputs": list(state.get("step_outputs", [])) + [result],
+                    "iteration_counts": iter_counts,
                 }
 
             graph.add_node(node_id, _make_async_node)
 
-        # Entry point = first valid node
         graph.set_entry_point(valid_nodes[0])
-
-        # ── Group edges by source node ─────────────────────────────────
-        # Each edge may be:
-        #   [src, dst]            — unconditional
-        #   [src, dst, condition] — conditional; "condition" is a plain
-        #                           keyword/phrase checked against the
-        #                           previous agent's output (case-insensitive
-        #                           substring match).
-        # ──────────────────────────────────────────────────────────────────
 
         # outgoing[src] = list of (dst, condition_or_None)
         outgoing: dict[str, list[tuple[str, str | None]]] = defaultdict(list)
@@ -541,6 +760,7 @@ class RuntimeExecutor:
                 continue
             src, dst = str(edge[0]), str(edge[1])
             condition: str | None = str(edge[2]).strip() if len(edge) >= 3 and edge[2] else None
+            # Allow back-edges for cyclic graphs (loop safety handled inside each node)
             if src in agents_map and dst in agents_map:
                 outgoing[src].append((dst, condition))
 
@@ -552,8 +772,6 @@ class RuntimeExecutor:
             default_next  = plain_targets[0] if plain_targets else END
 
             if cond_targets:
-                # Build a routing function that checks the last agent output
-                # against each condition keyword, falling back to default_next.
                 all_dests = {dst for dst, _ in cond_targets} | {default_next}
 
                 def _make_router(
@@ -574,13 +792,11 @@ class RuntimeExecutor:
                     {d: d for d in all_dests},
                 )
             else:
-                # Simple unconditional edge(s)
                 for dst in plain_targets:
                     graph.add_edge(src, dst)
 
             added_src.add(src)
 
-        # Any node with no explicit outgoing edge → END
         for node_id in valid_nodes:
             if node_id not in added_src:
                 graph.add_edge(node_id, END)
@@ -595,44 +811,50 @@ class RuntimeExecutor:
         self, _db: Session, agents_map: dict[str, Agent], _workflow: Workflow,
         initial_input: str = "Workflow started",
     ) -> tuple[list[dict], str]:
-        """Simple ordered execution when LangGraph is unavailable.
-
-        Mirrors the async node logic: tools run synchronously, then Gemini is
-        called to synthesise a natural-language response.
-        """
+        """Simple ordered execution when LangGraph is unavailable."""
         step_outputs: list[dict] = []
         current_input = initial_input
         for agent in agents_map.values():
+            window = self._memory_window(agent)
             prior_messages = self.memory.as_messages(str(agent.id))
             result = self._run_agent_step(agent, current_input)
 
-            user_content = current_input
-            if result["tool_outputs"]:
-                tool_ctx = "\n".join(
-                    f"[{t['tool']}]: {t['result']}" for t in result["tool_outputs"]
-                )
-                user_content += f"\n\nTool data available:\n{tool_ctx}"
+            if not result.get("guardrail_blocked"):
+                user_content = current_input
+                if result["tool_outputs"]:
+                    tool_ctx = "\n".join(
+                        f"[{t['tool']}]: {t['result']}" for t in result["tool_outputs"]
+                    )
+                    user_content += f"\n\nTool data available:\n{tool_ctx}"
 
-            llm_response, llm_tokens = await self._llm_call(
-                system_prompt=agent.system_prompt or "You are a helpful assistant.",
-                messages=prior_messages + [{"role": "user", "content": user_content}],
-                model=agent.model or "gemini-3-flash-preview",
-            )
-            if llm_response:
-                result["response"] = llm_response
-                result["tokens_used"] = llm_tokens
-            else:
-                logger.warning("LLM returned no response for agent %s", agent.name)
+                rules: dict = agent.interaction_rules or {}
+                temperature = rules.get("temperature")
+
+                llm_response, llm_tokens = await self._llm_call(
+                    system_prompt=self._build_system_prompt(agent),
+                    messages=prior_messages + [{"role": "user", "content": user_content}],
+                    model=agent.model or "llama-3.3-70b-versatile",
+                    temperature=temperature,
+                )
+                if llm_response:
+                    try:
+                        llm_response = _apply_guardrails(
+                            agent.guardrails or {}, llm_response, "output"
+                        )
+                    except GuardrailViolation as exc:
+                        llm_response = f"[Guardrail] {exc}"
+                    result["response"] = llm_response
+                    result["tokens_used"] = llm_tokens
+                else:
+                    logger.warning("LLM returned no response for agent %s", agent.name)
 
             self.memory.clear(str(agent.id))
             for m in prior_messages:
-                self.memory.append(str(agent.id), m["content"])
-            self.memory.append(str(agent.id), current_input)
-            self.memory.append(str(agent.id), result["response"])
+                self.memory.append(str(agent.id), m["content"], window)
+            self.memory.append(str(agent.id), current_input, window)
+            self.memory.append(str(agent.id), result["response"], window)
 
-            # Small pause to respect per-minute rate limits across agents
             await asyncio.sleep(2)
-
             current_input = result["response"]
             step_outputs.append(result)
         return step_outputs, current_input

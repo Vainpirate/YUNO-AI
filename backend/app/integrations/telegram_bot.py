@@ -36,28 +36,39 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Helper: agent→Telegram user mapping (Redis-backed, graceful fallback)
+# Helper: agent→Telegram user mapping (Redis-backed, in-memory fallback)
 # ---------------------------------------------------------------------------
+
+# In-memory fallback used when Redis is unavailable — survives for the
+# duration of the current server process.
+_local_mapping: dict[int, str] = {}
+
 
 def _get_agent_mapping(telegram_user_id: int) -> str | None:
     """Return agent_id string for a Telegram user, or None if not set."""
     try:
         from redis import Redis
         r = Redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=2)
-        return r.get(f"telegram_user:{telegram_user_id}:agent_id")
+        val = r.get(f"telegram_user:{telegram_user_id}:agent_id")
+        if val:
+            return val
     except Exception:
-        return None
+        pass
+    # Redis unavailable — use in-process fallback
+    return _local_mapping.get(telegram_user_id)
 
 
 def _set_agent_mapping(telegram_user_id: int, agent_id: str) -> None:
-    """Persist agent assignment for a Telegram user in Redis."""
+    """Persist agent assignment for a Telegram user (Redis + in-memory fallback)."""
+    # Always update local mapping so it works without Redis
+    _local_mapping[telegram_user_id] = agent_id
     try:
         from redis import Redis
         r = Redis.from_url(settings.redis_url, decode_responses=True, socket_connect_timeout=2)
         r.set(f"telegram_user:{telegram_user_id}:agent_id", agent_id)
-        logger.debug("Mapped Telegram user %s -> agent %s", telegram_user_id, agent_id)
-    except Exception as exc:
-        logger.warning("Could not persist Telegram->Agent mapping (Redis unavailable): %s", exc)
+        logger.debug("Mapped Telegram user %s -> agent %s (Redis)", telegram_user_id, agent_id)
+    except Exception:
+        logger.debug("Redis unavailable — agent mapping saved in-memory only")
 
 
 def _resolve_agent(db: Session, telegram_user_id: int) -> Agent | None:
@@ -123,6 +134,10 @@ class TelegramBotIntegration:
         app = (
             Application.builder()
             .token(self.bot_token)
+            .connect_timeout(30)
+            .read_timeout(30)
+            .write_timeout(30)
+            .pool_timeout(30)
             .build()
         )
         app.add_handler(CommandHandler("start", self._handle_start))
@@ -265,10 +280,13 @@ class TelegramBotIntegration:
             # Persist inbound
             _store_history(db, user_id, username, agent.id, "inbound", text)
 
-            # Show typing indicator
-            await context.bot.send_chat_action(
-                chat_id=update.effective_chat.id, action="typing"
-            )
+            # Show typing indicator (best-effort — timeout must not block the reply)
+            try:
+                await context.bot.send_chat_action(
+                    chat_id=update.effective_chat.id, action="typing"
+                )
+            except Exception:
+                pass
 
             # Execute agent
             try:
@@ -323,34 +341,41 @@ class TelegramBotIntegration:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Start long-polling (runs until the asyncio task is cancelled)."""
+        """Start long-polling with automatic restart on transient errors."""
         if not self.bot_token:
             logger.info("TELEGRAM_BOT_TOKEN not configured -- Telegram integration disabled.")
             return
 
-        logger.info("Starting Telegram bot (long polling)...")
-        try:
-            app = self._get_app()
-            async with app:
-                await app.start()
-                await app.updater.start_polling(drop_pending_updates=True)
-                logger.info("Telegram bot is live. Send /start to your bot to begin.")
-                # Block until cancelled
-                stop_event = asyncio.Event()
-                await stop_event.wait()
-        except asyncio.CancelledError:
-            logger.info("Telegram bot polling stopped (task cancelled).")
-        except Exception as exc:
-            logger.exception("Telegram bot crashed: %s", exc)
-        finally:
+        retry_delay = 5  # seconds between restart attempts
+        while True:
+            logger.info("Starting Telegram bot (long polling)...")
             try:
-                if self._app and self._app.updater.running:
-                    await self._app.updater.stop()
-                if self._app and self._app.running:
-                    await self._app.stop()
-            except Exception:
-                pass
-            self._app = None
+                self._app = None  # force fresh build on each attempt
+                app = self._get_app()
+                async with app:
+                    await app.start()
+                    await app.updater.start_polling(drop_pending_updates=True)
+                    logger.info("Telegram bot is live. Send /start to your bot to begin.")
+                    stop_event = asyncio.Event()
+                    await stop_event.wait()
+            except asyncio.CancelledError:
+                logger.info("Telegram bot polling stopped (task cancelled).")
+                break
+            except Exception as exc:
+                logger.warning("Telegram bot error: %s — retrying in %ds", exc, retry_delay)
+                self._app = None
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)  # exponential back-off, cap at 60s
+                continue
+            finally:
+                try:
+                    if self._app and self._app.updater.running:
+                        await self._app.updater.stop()
+                    if self._app and self._app.running:
+                        await self._app.stop()
+                except Exception:
+                    pass
+                self._app = None
 
 
 # ---------------------------------------------------------------------------

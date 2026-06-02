@@ -39,7 +39,9 @@ cd yuno-ai
 
 # 2. Copy and fill in environment variables
 cp backend/.env.example backend/.env
-# → set GEMINI_API_KEY and (optionally) TELEGRAM_BOT_TOKEN
+# → set GROQ_API_KEY (primary — free tier at console.groq.com)
+# → set GEMINI_API_KEY (optional fallback)
+# → set TELEGRAM_BOT_TOKEN (optional)
 
 # 3. Start all services
 docker-compose up --build

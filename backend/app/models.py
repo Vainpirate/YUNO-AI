@@ -21,6 +21,8 @@ class Agent(Base):
     channels: Mapped[dict | list | None] = mapped_column(JSON)
     memory_config: Mapped[dict | None] = mapped_column(JSON)
     guardrails: Mapped[dict | None] = mapped_column(JSON)
+    skills: Mapped[list | None] = mapped_column(JSON)
+    interaction_rules: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -34,6 +36,7 @@ class Workflow(Base):
     agents: Mapped[dict | list | None] = mapped_column(JSON)
     graph: Mapped[dict | None] = mapped_column(JSON)
     schedule: Mapped[str | None] = mapped_column(String(255))
+    max_iterations: Mapped[int | None] = mapped_column(default=10)
     template_name: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

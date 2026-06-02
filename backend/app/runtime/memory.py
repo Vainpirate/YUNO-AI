@@ -11,7 +11,7 @@ class MemoryStore:
     the executor translates into Gemini Content objects before each LLM call.
     """
 
-    WINDOW: int = 20  # keep last N individual messages (10 turns)
+    WINDOW: int = 20  # default — overridden per agent via memory_config
 
     def __init__(self) -> None:
         self._store: dict[str, list[str]] = defaultdict(list)
@@ -20,12 +20,12 @@ class MemoryStore:
     # Write
     # ------------------------------------------------------------------
 
-    def append(self, agent_id: str, message: str) -> None:
+    def append(self, agent_id: str, message: str, window: int | None = None) -> None:
         buf = self._store[agent_id]
         buf.append(message)
-        # Trim to window size to prevent unbounded growth
-        if len(buf) > self.WINDOW:
-            self._store[agent_id] = buf[-self.WINDOW :]
+        limit = window if window and window > 0 else self.WINDOW
+        if len(buf) > limit:
+            self._store[agent_id] = buf[-limit:]
 
     def clear(self, agent_id: str) -> None:
         self._store.pop(agent_id, None)

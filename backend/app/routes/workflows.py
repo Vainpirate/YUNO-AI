@@ -153,3 +153,39 @@ def workflow_status(workflow_id: UUID):
         "workflow_id": str(workflow_id),
         "status": _execution_state.get(str(workflow_id), "unknown"),
     }
+
+
+@router.post("/{workflow_id}/schedule")
+def set_workflow_schedule(
+    workflow_id: UUID,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Set or clear the cron schedule for a workflow.
+
+    Body: ``{"schedule": "*/5 * * * *"}`` — standard 5-field cron expression.
+    Pass ``{"schedule": null}`` or ``{"schedule": ""}`` to remove the schedule.
+    """
+    workflow = db.get(Workflow, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    cron_expr: str | None = payload.get("schedule") or None
+    workflow.schedule = cron_expr
+    db.commit()
+
+    from app.scheduler import workflow_scheduler
+    workflow_scheduler.reschedule(str(workflow_id), cron_expr)
+
+    return {
+        "workflow_id": str(workflow_id),
+        "schedule": cron_expr,
+        "message": f"Schedule {'set to: ' + cron_expr if cron_expr else 'cleared'}",
+    }
+
+
+@router.get("/scheduled/list")
+def list_scheduled_workflows():
+    """Return all workflows that currently have an active cron schedule."""
+    from app.scheduler import workflow_scheduler
+    return {"scheduled": workflow_scheduler.list_scheduled()}

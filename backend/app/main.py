@@ -32,12 +32,39 @@ logger = logging.getLogger(__name__)
 # Lifespan context manager
 # ---------------------------------------------------------------------------
 
+def _migrate_db() -> None:
+    """Add columns introduced after the initial schema without dropping data.
+
+    SQLAlchemy's create_all only creates missing *tables* — it never alters
+    existing ones.  This function issues idempotent ALTER TABLE statements for
+    every column added since v1.0 so developers with an old yuno_dev.db don't
+    have to wipe their data.
+    """
+    from sqlalchemy import text
+    migrations = [
+        # v1.1 — agent skills + interaction rules
+        ("agents",    "skills",            "TEXT"),
+        ("agents",    "interaction_rules", "TEXT"),
+        # v1.2 — workflow loop safety
+        ("workflows", "max_iterations",    "INTEGER DEFAULT 10"),
+    ]
+    with engine.connect() as conn:
+        for table, column, col_type in migrations:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                conn.commit()
+                logger.info("Migration applied: %s.%s", table, column)
+            except Exception:  # column already exists — safe to ignore
+                pass
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────
-    # 1. DB tables
+    # 1. DB tables + incremental column migrations
     Base.metadata.create_all(bind=engine)
-    logger.info("Database tables verified/created.")
+    _migrate_db()
+    logger.info("Database tables verified/migrated.")
 
     # 2. External tools
     from app.integrations.external_tools import register_external_tools
@@ -49,6 +76,12 @@ async def lifespan(app: FastAPI):
     tg_task = asyncio.create_task(telegram_bot.run(), name="telegram-bot")
     logger.info("Telegram bot task started.")
 
+    # 4. Workflow scheduler (asyncio background task — non-blocking)
+    from app.scheduler import workflow_scheduler
+    from app.database import SessionLocal
+    await workflow_scheduler.start(SessionLocal)
+    logger.info("Workflow scheduler initialised.")
+
     yield  # ← application runs here
 
     # ── Shutdown ─────────────────────────────────────────────────────────
@@ -56,6 +89,9 @@ async def lifespan(app: FastAPI):
     with contextlib.suppress(asyncio.CancelledError):
         await tg_task
     logger.info("Telegram bot task stopped.")
+
+    workflow_scheduler.shutdown()
+    logger.info("Workflow scheduler stopped.")
 
 
 # ---------------------------------------------------------------------------
